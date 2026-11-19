@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#14161f" />
+<title>Card Battler</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #14161f; touch-action: manipulation; }
+  #game { width: 100%; height: 100%; }
+  #game canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<script src="./phaser.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  // ─────────────────────────────────────────────────────────────
+  // 竖屏 720×1280，手机优先
+  // ─────────────────────────────────────────────────────────────
+  const W = 720;
+  const H = 1280;
+
+  const CONFIG = {
+    MAX_HP: 70,
+    ENERGY: 3,
+    DRAW: 5,
+    HAND_CAP: 10,
+    TOTAL_WINS: 3,
+    ENEMY_HP_BASE: 70,
+    ENEMY_HP_PER_TIER: 20,
+    ENEMY_ATK_PER_TIER: 3,
+    VULN_MULT: 1.5,
+    WEAK_MULT: 0.75,
+  };
+
+  const KEYWORDS = {
+    vuln: { name: '易伤', short: '易', color: '#ffb74d', desc: '受到伤害 ×1.5，每回合 -1 层' },
+    weak: { name: '虚弱', short: '弱', color: '#b39ddb', desc: '造成伤害 ×0.75，每回合 -1 层' },
+    silence: { name: '沉默', short: '默', color: '#ff8a80', desc: '本回合不能打出攻击牌' },
+    strength: { name: '力量', short: '力', color: '#ffd54f', desc: '每次攻击额外造成等量伤害' },
+    block: { name: '格挡', short: '挡', color: '#8ab4f8', desc: '抵消等量伤害，回合开始清零' },
+  };
+
+  const CARD_DEFS = {
+    strike: { name: '打击', cost: 1, type: 'attack', text: '造成 6 点伤害', ops: [{ k: 'damage', v: 6 }], kw: [] },
+    defend: { name: '防御', cost: 1, type: 'skill', text: '获得 5 点格挡', ops: [{ k: 'block', v: 5 }], kw: ['block'] },
+    bash: { name: '重击', cost: 2, type: 'attack', text: '造成 8 点伤害，施加 2 层易伤', ops: [{ k: 'damage', v: 8 }, { k: 'vuln', v: 2 }], kw: ['vuln'] },
+    heavy: { name: '重斩', cost: 2, type: 'attack', text: '造成 14 点伤害', ops: [{ k: 'damage', v: 14 }], kw: [] },
+    guard: { name: '铁壁', cost: 2, type: 'skill', text: '获得 12 点格挡', ops: [{ k: 'block', v: 12 }], kw: ['block'] },
+    rage: { name: '战意', cost: 1, type: 'power', text: '获得 2 点力量', ops: [{ k: 'str', v: 2 }], kw: ['strength'] },
+    weaken: { name: '削弱', cost: 1, type: 'attack', text: '造成 6 点伤害，施加 2 层虚弱', ops: [{ k: 'damage', v: 6 }, { k: 'weak', v: 2 }], kw: ['weak'] },
+  };
+
+  const INTENT_BASE = [
+    { k: 'attack', v: 10 },
+    { k: 'weak', v: 2 },
+    { k: 'defend', v: 8 },
+    { k: 'silence', v: 1 },
+    { k: 'attack', v: 15 },
+  ];
+  const REWARD_POOL = ['heavy', 'guard', 'rage', 'weaken'];
+
+  // ─────────────────────────────────────────────────────────────
+  // 规则引擎
+  // ─────────────────────────────────────────────────────────────
+  let UID = 1;
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function shuffle(arr, rng) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    }
+    return arr;
+  }
+
+  function makeCard(type) {
+    const def = CARD_DEFS[type];
+    return { uid: UID++, type, name: def.name, cost: def.cost, type2: def.type, text: def.text, ops: def.ops, kw: def.kw };
+  }
+
+  function newRun(seed) {
+    const rng = mulberry32((seed >>> 0) || 1);
+    const run = {
+      seed, rng,
+      hp: CONFIG.MAX_HP, maxHp: CONFIG.MAX_HP,
+      strength: 0, wins: 0,
+      deck: [],
+      stats: { turns: 0, dmgDealt: 0, dmgTaken: 0, blockGained: 0, cardsPlayed: 0 },
+      fight: null,
+      log: '',
+    };
+    for (let i = 0; i < 5; i++) run.deck.push(makeCard('strike'));
+    for (let i = 0; i < 4; i++) run.deck.push(makeCard('defend'));
+    run.deck.push(makeCard('bash'));
+    return run;
+  }
+
+  function getIntent(f) {
+    const b = INTENT_BASE[f.intentIdx % INTENT_BASE.length];
+    if (b.k === 'attack') return { k: 'attack', v: b.v + f.tier * CONFIG.ENEMY_ATK_PER_TIER };
+    if (b.k === 'defend') return { k: 'defend', v: b.v + f.tier * 2 };
+    if (b.k === 'weak') return { k: 'weak', v: b.v + (f.tier > 1 ? 1 : 0) };
+    return { k: b.k, v: b.v };
+  }
+
+  function startFight(run, tier) {
+    run.hp = Math.min(run.maxHp, run.hp + (tier > 0 ? 12 : 0));
+    const max = CONFIG.ENEMY_HP_BASE + tier * CONFIG.ENEMY_HP_PER_TIER;
+    run.fight = {
+      tier,
+      enemyHp: max, enemyMax: max,
+      enemyVuln: 0, enemyBlock: 0, enemyWeak: 0,
+      playerWeak: 0, playerSilence: 0,
+      intentIdx: 0, turn: 0, block: 0, energy: 0,
+      draw: shuffle(run.deck.slice(), run.rng),
+      hand: [], discard: [], limbo: null,
+      over: false, result: null,
+    };
+    beginTurn(run);
+  }
+
+  function beginTurn(run) {
+    const f = run.fight;
+    f.turn++;
+    f.block = 0;
+    f.energy = CONFIG.ENERGY;
+    if (f.enemyVuln > 0) f.enemyVuln--;
+    if (f.playerWeak > 0) f.playerWeak--;
+    drawCards(run, CONFIG.DRAW);
+    run.stats.turns++;
+  }
+
+  function drawCards(run, n) {
+    const f = run.fight;
+    for (let i = 0; i < n; i++) {
+      if (!f.draw.length) {
+        if (!f.discard.length) return;
+        f.draw = shuffle(f.discard.slice(), run.rng);
+        f.discard = [];
+      }
+      const c = f.draw.pop();
+      if (f.hand.length < CONFIG.HAND_CAP) f.hand.push(c);
+      else f.discard.push(c);
+    }
+  }
+
+  function attackDamage(run, base) {
+    const f = run.fight;
+    let dmg = base + run.strength;
+    if (f.playerWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
+    return dmg;
+  }
+
+  function applyOp(run, op) {
+    const f = run.fight;
+    if (op.k === 'damage') {
+      let dmg = attackDamage(run, op.v);
+      if (f.enemyVuln > 0) dmg = Math.floor(dmg * CONFIG.VULN_MULT);
+      const absorbed = Math.min(f.enemyBlock, dmg);
+      f.enemyBlock -= absorbed;
+      dmg -= absorbed;
+      f.enemyHp = Math.max(0, f.enemyHp - dmg);
+      run.stats.dmgDealt += dmg;
+      const parts = [];
+      if (f.enemyVuln > 0) parts.push('易伤');
+      if (f.playerWeak > 0) parts.push('虚弱');
+      const blocked = absorbed > 0 ? `，敌人格挡吃掉 ${absorbed}` : '';
+      run.log = `造成 ${dmg} 点伤害${parts.length ? '（' + parts.join('·') + '）' : ''}${blocked}`;
+    } else if (op.k === 'block') {
+      f.block += op.v;
+      run.stats.blockGained += op.v;
+      run.log = `获得 ${op.v} 点格挡`;
+    } else if (op.k === 'vuln') {
+      f.enemyVuln += op.v;
+      run.log = `敌人获得 ${op.v} 层易伤`;
+    } else if (op.k === 'weak') {
+      f.enemyWeak += op.v;
+      run.log = `敌人获得 ${op.v} 层虚弱`;
+    } else if (op.k === 'str') {
+      run.strength += op.v;
+      run.log = `你获得 ${op.v} 点力量`;
+    }
+  }
+
+  function canPlay(run, card) {
+    const f = run.fight;
+    if (f.over) return { ok: false, why: 'over' };
+    if (!card) return { ok: false, why: 'gone' };
+    if (card.type2 === 'attack' && f.playerSilence > 0) return { ok: false, why: 'silence' };
+    if (f.energy < card.cost) return { ok: false, why: 'energy' };
+    return { ok: true };
+  }
+
+  function playCard(run, uid) {
+    const f = run.fight;
+    const c = f.hand.find((x) => x.uid === uid);
+    const check = canPlay(run, c);
+    if (!check.ok) return check;
+
+    f.energy -= c.cost;
+    f.hand = f.hand.filter((x) => x.uid !== uid);
+    f.limbo = c;
+    for (const op of c.ops) applyOp(run, op);
+    f.limbo = null;
+    f.discard.push(c);
+    run.stats.cardsPlayed++;
+
+    if (f.enemyHp <= 0) { f.over = true; f.result = 'win'; }
+    return { ok: true };
+  }
+
+  function enemyAct(run) {
+    const f = run.fight;
+    const intent = getIntent(f);
+    f.enemyBlock = 0;
+
+    if (intent.k === 'defend') {
+      f.enemyBlock = intent.v;
+      run.log = `敌人获得 ${intent.v} 点格挡`;
+    } else if (intent.k === 'attack') {
+      let dmg = intent.v;
+      if (f.enemyWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
+      const absorbed = Math.min(f.block, dmg);
+      f.block -= absorbed;
+      dmg -= absorbed;
+      const tag = f.enemyWeak > 0 ? '（虚弱）' : '';
+      if (dmg > 0) {
+        run.hp -= dmg;
+        run.stats.dmgTaken += dmg;
+        run.log = `敌人攻击 ${intent.v} 点${tag}，你受到 ${dmg} 点${absorbed > 0 ? `（格挡抵消 ${absorbed}）` : ''}`;
+      } else {
+        run.log = `敌人攻击 ${intent.v} 点${tag}，被格挡完全抵消`;
+      }
+    } else if (intent.k === 'weak') {
+      f.playerWeak += intent.v;
+      run.log = `你获得 ${intent.v} 层虚弱`;
+    } else if (intent.k === 'silence') {
+      f.playerSilence = 1;
+      run.log = '你被沉默：本回合不能打出攻击牌';
+    }
+
+    f.intentIdx++;
+    if (f.enemyWeak > 0) f.enemyWeak--;
+    if (run.hp <= 0) { run.hp = 0; f.over = true; f.result = 'lose'; }
+  }
+
+  function endTurn(run) {
+    const f = run.fight;
+    if (f.over) return;
+    f.playerSilence = 0;
+    f.discard.push(...f.hand);
+    f.hand = [];
+    enemyAct(run);
+    if (!f.over) beginTurn(run);
+  }
+
+  function offerRewards(run) {
+    return shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3);
+  }
+
+  function pickReward(run, type) {
+    run.deck.push(makeCard(type));
+    run.wins++;
+    run.log = `「${CARD_DEFS[type].name}」加入牌组`;
+  }
+
+  window.__cardProto = {
+    CONFIG, KEYWORDS, CARD_DEFS,
+    newRun, startFight, playCard, endTurn, beginTurn, getIntent, offerRewards, pickReward, canPlay,
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  // 布局（竖屏）
+  // ─────────────────────────────────────────────────────────────
+  const FONT = "'PingFang SC','Microsoft YaHei',sans-serif";
+  const COL = {
+    bg: 0x14161f,
+    text: '#e8eaf2',
+    dim: '#8b90a6',
+    gold: '#f2c14e',
+    red: 0xd94545,
+    green: 0x3fbf7f,
+    attack: 0xc74a3f,
+    skill: 0x2f6f9e,
+    power: 0x7a4bd9,
+  };
+
+  const L = {
+    enemy: { x: W / 2, y: 330, r: 88 },
+    player: { x: W / 2, y: 830, r: 70 },
+    hand: { y: 1160, cw: 112, ch: 152, gap: 8 },
+    endBtn: { x: W - 120, y: 690, w: 176, h: 56 },
+    log: { y: 620 },
+    deckInfo: { y: 1250 },
+  };
+
+  class BattleScene extends Phaser.Scene {
+    constructor() { super('battle'); }
+
+    create() {
+      this.run = newRun(20261119);
+      startFight(this.run, 0);
+      this.showGlossary = false;
+      this.tip = null;
+      this.renderPending = false;
+      this.rewardLocked = false;
+      this.acting = false;
+      this.floats = [];
+      this.cardViews = new Map();
+      this.overSound = false;
+      this.ac = null;
+      this.render();
+      Object.assign(window, { game: this.game });
+    }
+
+    text(x, y, str, size = 17, color = COL.text, align = 'center') {
+      return this.add.text(x, y, str, { fontFamily: FONT, fontSize: `${size}px`, color, align }).setOrigin(0.5);
+    }
+
+    bar(x, y, w, h, ratio, color) {
+      const g = this.add.graphics();
+      g.fillStyle(0x2a2d3a, 1);
+      g.fillRoundedRect(x, y, w, h, h / 2);
+      const rw = Math.max(0, Math.min(1, ratio)) * w;
+      if (rw > 0) { g.fillStyle(color, 1); g.fillRoundedRect(x, y, rw, h, h / 2); }
+      return g;
+    }
+
+    button(x, y, w, h, label, onClick) {
+      const g = this.add.graphics();
+      g.fillStyle(0x3b5bdb, 1);
+      g.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
+      const t = this.text(0, 0, label, 18, '#ffffff');
+      const c = this.add.container(x, y, [g, t]);
+      c.setSize(w, h);
+      c.setInteractive(new Phaser.Geom.Rectangle(-w / 2, -h / 2, w, h), Phaser.Geom.Rectangle.Contains);
+      c.on('pointerover', () => g.clear().fillStyle(0x4c6ef5, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
+      c.on('pointerout', () => g.clear().fillStyle(0x3b5bdb, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
+      c.on('pointerdown', onClick);
+      return c;
+    }
+
+    hideTip() {
+      if (this.tip) { this.tip.destroy(true); this.tip = null; }
+    }
+
+    showTip(cx, cy, lines) {
+      this.hideTip();
+      const w = 320;
+      const pad = 12;
+      const lh = 21;
+      const h = pad * 2 + lines.length * lh;
+      let ty = cy;
+      if (ty - h / 2 < 8) ty = h / 2 + 8;
+      if (ty + h / 2 > H - 8) ty = H - h / 2 - 8;
+      const bg = this.add.graphics();
+      bg.fillStyle(0x0b0d15, 0.97);
+      bg.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
+      bg.lineStyle(1, 0x39405e, 1);
+      bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 10);
+      const kids = [bg];
+      lines.forEach((ln, i) => {
+        kids.push(this.add.text(-w / 2 + pad, -h / 2 + pad + i * lh, ln.text, {
+          fontFamily: FONT, fontSize: `${ln.size || 14}px`, color: ln.color || '#e8eaf2',
+        }).setOrigin(0, 0));
+      });
+      this.tip = this.add.container(cx, ty, kids).setDepth(9999);
+    }
+
+    tipForKeyword(key) {
+      const k = KEYWORDS[key];
+      return { text: `${k.name}：${k.desc}`, color: k.color };
+    }
+
+    badge(x, y, key, stacks, prefix = '') {
+      const k = KEYWORDS[key];
+      const g = this.add.graphics();
+      g.fillStyle(0x1a1d2b, 1);
+      g.fillCircle(0, 0, 19);
+      g.lineStyle(2, 0xffffff, 0.18);
+      g.strokeCircle(0, 0, 19);
+      g.lineStyle(2, Phaser.Display.Color.HexStringToColor(k.color).color, 1);
+      g.strokeCircle(0, 0, 19);
+      const label = k.short + (stacks > 1 ? stacks : '');
+      const t = this.text(0, 0, label, 17, k.color);
+      const c = this.add.container(x, y, [g, t]);
+      c.setSize(38, 38);
+      c.setInteractive(new Phaser.Geom.Rectangle(-19, -19, 38, 38), Phaser.Geom.Rectangle.Contains);
+      c.on('pointerdown', (p, lx, ly) => {
+        p.event && p.event.stopPropagation && p.event.stopPropagation();
+        this.showTip(x, y - 56, [
+          { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
+          { text: k.desc, color: '#c9cde0' },
+        ]);
+      });
+      c.on('pointerover', () => {
+        this.showTip(x, y - 56, [
+          { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
+          { text: k.desc, color: '#c9cde0' },
+        ]);
+      });
+      c.on('pointerout', () => this.hideTip());
+      return c;
+    }
+
+    cardView(card, x, y, opts = {}) {
+      const cw = opts.w || L.hand.cw;
+      const ch = opts.h || L.hand.ch;
+      const baseY = y;
+      const cont = this.add.container(x, y);
+      const g = this.add.graphics();
+      const fill = card.type2 === 'attack' ? COL.attack : card.type2 === 'power' ? COL.power : COL.skill;
+      g.fillStyle(fill, opts.disabled ? 0.35 : 1);
+      g.fillRoundedRect(-cw / 2, -ch / 2, cw, ch, 10);
+      g.lineStyle(2, opts.disabled ? 0x8a6b2a : 0xffffff, opts.disabled ? 1 : 0.22);
+      g.strokeRoundedRect(-cw / 2, -ch / 2, cw, ch, 10);
+      cont.add(g);
+
+      cont.add(this.text(0, -ch / 2 + 22, card.name, opts.big ? 20 : 16, '#ffffff'));
+      cont.add(this.text(-cw / 2 + 15, -ch / 2 + 17, String(card.cost), 16, COL.gold));
+      const body = this.add.text(0, 6, card.text, {
+        fontFamily: FONT, fontSize: `${opts.big ? 14 : 12}px`, color: '#ffffff',
+        align: 'center', wordWrap: { width: cw - 20 },
+      }).setOrigin(0.5);
+      cont.add(body);
+      const tag = card.type2 === 'attack' ? '攻击' : card.type2 === 'power' ? '能力' : '技能';
+      cont.add(this.text(0, ch / 2 - 16, tag, 11, '#ffffff'));
+
+      if (opts.disabled) cont.add(this.text(0, ch / 2 - 38, '不可用', 11, '#ffcf70'));
+
+      cont.setSize(cw, ch);
+      cont.setInteractive(new Phaser.Geom.Rectangle(-cw / 2 - 6, -ch / 2 - 20, cw + 12, ch + 40), Phaser.Geom.Rectangle.Contains);
+
+      if (opts.onClick) {
+        cont.on('pointerover', () => {
+          this.tweens.add({ targets: cont, scale: 1.06, y: baseY - 10, duration: 90 });
+          const lines = [
+            { text: `${card.name}  ·  ${card.cost} 费  ·  ${tag}`, color: '#ffffff', size: 15 },
+            { text: card.text, color: '#c9cde0' },
+          ];
+          (card.kw || []).forEach((key) => lines.push(this.tipForKeyword(key)));
+          if (card.type2 === 'attack') lines.push({ text: '攻击牌：受「沉默」影响', color: '#8b90a6' });
+          this.showTip(x, baseY - 170, lines);
+        });
+        cont.on('pointerout', () => {
+          this.tweens.add({ targets: cont, scale: 1, y: baseY, duration: 90 });
+          this.hideTip();
+        });
+        cont.on('pointerdown', opts.onClick);
+      }
+      return cont;
+    }
+
+    // ── 主渲染 ──────────────────────────────────────────────
+    render() {
+      this.tweens.killAll();
+      this.hideTip();
+      this.children.removeAll(true);
+      this.cardViews = new Map();
+
+      const run = this.run;
+      const f = run.fight;
+
+      this.add.rectangle(W / 2, H / 2, W, H, COL.bg);
+
+      this.text(W / 2, 42, `第 ${run.wins + 1} 场 / 共 ${CONFIG.TOTAL_WINS} 场`, 22, COL.text);
+      this.text(20, 84, `回合 ${f.turn}`, 15, COL.dim).setOrigin(0, 0.5);
+      this.text(W - 20, 84, `种子 ${run.seed}`, 13, COL.dim).setOrigin(1, 0.5);
+      this.button(76, 84, 104, 36, '? 词条', () => this.toggleGlossary());
+
+      this.drawEnemy(f);
+      this.drawPlayer(run, f);
+
+      const hand = f.hand;
+      const { cw, gap, y: cardY } = L.hand;
+      const totalW = hand.length * (cw + gap) - gap;
+      const startX = W / 2 - totalW / 2 + cw / 2;
+      hand.forEach((c, i) => {
+        const x = startX + i * (cw + gap);
+        const check = canPlay(run, c);
+        const view = this.cardView(c, x, cardY, {
+          disabled: !check.ok,
+          onClick: () => this.tryPlay(c.uid),
+        });
+        this.cardViews.set(c.uid, view);
+      });
+
+      if (!f.over) this.button(L.endBtn.x, L.endBtn.y, L.endBtn.w, L.endBtn.h, '结束回合', () => this.doEndTurn());
+
+      if (f.playerSilence > 0) {
+        this.text(W / 2, L.log.y, '你被沉默：本回合只能出技能/能力牌', 15, '#ff8a80');
+      } else if (run.log) {
+        this.text(W / 2, L.log.y, run.log, 15, COL.gold);
+      }
+
+      this.text(20, L.deckInfo.y, `抽牌堆 ${f.draw.length}`, 14, COL.dim).setOrigin(0, 0.5);
+      this.text(140, L.deckInfo.y, `弃牌堆 ${f.discard.length}`, 14, COL.dim).setOrigin(0, 0.5);
+      this.text(W - 20, L.deckInfo.y, `出牌 ${run.stats.cardsPlayed} · 伤害 ${run.stats.dmgDealt} · 承伤 ${run.stats.dmgTaken}`, 11, '#5b6075').setOrigin(1, 0.5);
+
+      if (this.showGlossary) this.drawGlossary();
+      if (f.over) this.drawOverlay(f);
+      this.renderFloats();
+    }
+
+    drawEnemy(f) {
+      const { x: cx, y: cy, r } = L.enemy;
+      const g = this.add.graphics();
+      g.fillStyle(0x3a2f4a, 1);
+      g.fillCircle(cx, cy, r);
+      g.lineStyle(3, 0x6b4fa8, 1);
+      g.strokeCircle(cx, cy, r);
+      g.fillStyle(0xffdd66, 1);
+      g.fillCircle(cx - r * 0.33, cy - r * 0.14, r * 0.12);
+      g.fillCircle(cx + r * 0.33, cy - r * 0.14, r * 0.12);
+      g.lineStyle(4, 0x6b4fa8, 1);
+      g.beginPath();
+      g.arc(cx, cy + r * 0.22, r * 0.36, 0.15 * Math.PI, 0.85 * Math.PI, false);
+      g.strokePath();
+
+      this.text(cx, cy - r - 46, `敌人 · HP ${f.enemyHp}/${f.enemyMax}`, 18, COL.text);
+      this.bar(cx - 120, cy + r + 22, 240, 16, f.enemyHp / f.enemyMax, COL.red);
+
+      const intent = getIntent(f);
+      const intentMap = {
+        attack: `意图：攻击 ${intent.v}`,
+        defend: `意图：防御 ${intent.v}`,
+        weak: `意图：施加 ${intent.v} 层虚弱`,
+        silence: '意图：沉默',
+      };
+      this.text(cx, cy + r + 56, intentMap[intent.k] || '', 18, intent.k === 'attack' ? '#ff8a80' : '#ffd54f');
+      if (intent.k === 'silence') this.text(cx, cy + r + 82, '（本回合不能出攻击牌）', 13, '#8b90a6');
+
+      const badges = [];
+      if (f.enemyVuln > 0) badges.push(['vuln', f.enemyVuln]);
+      if (f.enemyWeak > 0) badges.push(['weak', f.enemyWeak]);
+      if (f.enemyBlock > 0) badges.push(['block', f.enemyBlock]);
+      const bx0 = cx - ((badges.length - 1) * 46) / 2;
+      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 120, k, v, '敌人：'));
+    }
+
+    drawPlayer(run, f) {
+      const { x: cx, y: cy, r } = L.player;
+      const g = this.add.graphics();
+      g.fillStyle(0x223a33, 1);
+      g.fillCircle(cx, cy, r);
+      g.lineStyle(3, 0x3fbf7f, 1);
+      g.strokeCircle(cx, cy, r);
+      g.fillStyle(0xbfe8d6, 1);
+      g.fillCircle(cx - r * 0.32, cy - r * 0.14, r * 0.1);
+      g.fillCircle(cx + r * 0.32, cy - r * 0.14, r * 0.1);
+
+      this.text(cx, cy - r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 18, COL.text);
+      this.bar(cx - 110, cy + r + 20, 220, 16, run.hp / run.maxHp, COL.green);
+      this.text(cx - 70, cy + r + 52, `能量 ${f.energy}/${CONFIG.ENERGY}`, 17, COL.gold);
+      if (f.block > 0) this.text(cx + 70, cy + r + 52, `格挡 ${f.block}`, 17, '#8ab4f8');
+
+      const badges = [];
+      if (f.playerWeak > 0) badges.push(['weak', f.playerWeak]);
+      if (f.playerSilence > 0) badges.push(['silence', f.playerSilence]);
+      if (run.strength > 0) badges.push(['strength', run.strength]);
+      if (f.block > 0) badges.push(['block', f.block]);
+      const bx0 = cx - ((badges.length - 1) * 46) / 2;
+      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 100, k, v, '你：'));
+    }
+
+    drawGlossary() {
+      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.8).setInteractive();
+      this.text(W / 2, 250, '词条说明', 28, COL.gold);
+      this.text(W / 2, 292, '点卡牌、状态徽章也能看到解释', 14, COL.dim);
+      const keys = Object.keys(KEYWORDS);
+      const rowH = 66;
+      const top = 360;
+      keys.forEach((key, i) => {
+        const k = KEYWORDS[key];
+        const y = top + i * rowH;
+        const g = this.add.graphics();
+        g.fillStyle(0x1a1d2b, 1);
+        g.fillRoundedRect(W / 2 - 320, y - 26, 640, 54, 10);
+        g.lineStyle(1, 0x2c3147, 1);
+        g.strokeRoundedRect(W / 2 - 320, y - 26, 640, 54, 10);
+        g.lineStyle(2, Phaser.Display.Color.HexStringToColor(k.color).color, 1);
+        g.strokeCircle(W / 2 - 284, y + 1, 17);
+        this.text(W / 2 - 284, y + 1, k.short, 16, k.color);
+        this.text(W / 2 - 250, y, k.name, 17, k.color).setOrigin(0, 0.5);
+        this.text(W / 2 - 188, y, k.desc, 15, '#c9cde0').setOrigin(0, 0.5);
+      });
+      this.button(W / 2, top + keys.length * rowH + 26, 180, 50, '关闭', () => this.toggleGlossary());
+    }
+
+    toggleGlossary() {
+      this.showGlossary = !this.showGlossary;
+      this.scheduleRender();
+    }
+
+    drawOverlay(f) {
+      if (!this.overSound) { this.overSound = true; this.sfx(f.result === 'lose' ? 'lose' : 'win'); }
+      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.7).setInteractive();
+      const run = this.run;
+
+      if (f.result === 'lose') {
+        this.text(W / 2, H / 2 - 110, '你倒下了', 38, '#ff6b6b');
+        this.text(W / 2, H / 2 - 50, `第 ${run.wins + 1} 场失败 · 出牌 ${run.stats.cardsPlayed} 次`, 17, COL.dim);
+        this.button(W / 2, H / 2 + 50, 200, 56, '再来一局', () => this.restart());
+        return;
+      }
+
+      if (run.wins >= CONFIG.TOTAL_WINS - 1) {
+        this.text(W / 2, H / 2 - 120, '通关！', 42, COL.gold);
+        this.text(W / 2, H / 2 - 56, `连赢 ${CONFIG.TOTAL_WINS} 场，牌组 ${run.deck.length} 张`, 18, COL.dim);
+        this.button(W / 2, H / 2 + 36, 200, 56, '再来一局', () => this.restart());
+        return;
+      }
+
+      this.text(W / 2, 240, '战斗胜利', 30, COL.gold);
+      this.text(W / 2, 286, '选一张牌加入牌组', 17, COL.dim);
+      const rewards = offerRewards(run);
+      const cw = 150, gap = 16;
+      const totalW = rewards.length * (cw + gap) - gap;
+      const startX = W / 2 - totalW / 2 + cw / 2;
+      rewards.forEach((type, i) => {
+        const def = CARD_DEFS[type];
+        const card = { uid: -1 - i, type, name: def.name, cost: def.cost, type2: def.type, text: def.text, ops: def.ops, kw: def.kw };
+        this.cardView(card, startX + i * (cw + gap), 500, {
+          w: 150, h: 200, big: true,
+          onClick: () => this.chooseReward(type),
+        });
+      });
+      this.button(W / 2, 700, 200, 50, '跳过（不推荐）', () => this.chooseReward(null));
+    }
+
+    // ── 交互 ────────────────────────────────────────────────
+    scheduleRender() {
+      if (this.renderPending) return;
+      this.renderPending = true;
+      this.time.delayedCall(0, () => {
+        this.renderPending = false;
+        if (this.scene && this.sys.isActive()) this.render();
+      });
+    }
+
+    tryPlay(uid) {
+      if (this.acting) return;
+      this.hideTip();
+      const f = this.run.fight;
+      const card = f.hand.find((c) => c.uid === uid);
+      if (!card) return;
+      const hpBefore = f.enemyHp;
+      const blockBefore = f.block;
+      const res = playCard(this.run, uid);
+      if (!res.ok) {
+        if (res.why === 'energy') this.run.log = '能量不足';
+        else if (res.why === 'silence') this.run.log = '被沉默：本回合不能出攻击牌';
+        else if (res.why === 'over') this.run.log = '战斗已结束';
+        this.cameras.main.shake(90, 0.004);
+        this.sfx('deny');
+        this.scheduleRender();
+        return;
+      }
+
+      this.acting = true;
+      const isAttack = card.type2 === 'attack';
+      const view = this.cardViews.get(uid);
+      const target = isAttack ? { x: L.enemy.x, y: L.enemy.y } : { x: L.player.x, y: L.player.y };
+      if (view) {
+        this.tweens.add({
+          targets: view, x: target.x, y: target.y, scale: 0.28, alpha: 0.25,
+          duration: 230, ease: 'Cubic.easeIn',
+        });
+      }
+      if (f.enemyHp < hpBefore) this.addFloat(L.enemy.x + 90, L.enemy.y - 150, `-${hpBefore - f.enemyHp}`, '#ff6b6b');
+      if (f.block > blockBefore) this.addFloat(L.player.x - 90, L.player.y + 110, `+${f.block - blockBefore} 格挡`, '#8ab4f8');
+      if (card.ops.some((o) => o.k === 'vuln')) this.addFloat(L.enemy.x + 90, L.enemy.y - 100, '易伤 +2', '#ffb74d');
+      if (card.ops.some((o) => o.k === 'weak')) this.addFloat(L.enemy.x + 90, L.enemy.y - 100, '虚弱 +2', '#b39ddb');
+      if (card.ops.some((o) => o.k === 'str')) this.addFloat(L.player.x, L.player.y + 110, '力量 +2', '#ffd54f');
+      if (isAttack && f.enemyHp < hpBefore) {
+        this.sfx('hit');
+        this.cameras.main.shake(110, 0.006);
+        this.cameras.main.flash(90, 255, 120, 120);
+      } else {
+        this.sfx('block');
+      }
+      this.time.delayedCall(250, () => {
+        this.acting = false;
+        this.scheduleRender();
+      });
+    }
+
+    doEndTurn() {
+      if (this.acting) return;
+      const hpBefore = this.run.hp;
+      endTurn(this.run);
+      if (this.run.hp < hpBefore) {
+        this.addFloat(L.player.x, L.player.y + 110, `-${hpBefore - this.run.hp}`, '#ff6b6b');
+        this.sfx('hit');
+        this.cameras.main.shake(130, 0.007);
+      } else {
+        this.sfx('block');
+      }
+      this.acting = true;
+      this.time.delayedCall(160, () => {
+        this.acting = false;
+        this.scheduleRender();
+      });
+    }
+
+    sfx(kind) {
+      try {
+        if (!this.ac) this.ac = new (window.AudioContext || window.webkitAudioContext)();
+        if (this.ac.state === 'suspended') this.ac.resume();
+        const ctx = this.ac;
+        const play = (freq, dur, type, vol, when = 0) => {
+          const t0 = ctx.currentTime + when;
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = type;
+          o.frequency.setValueAtTime(freq, t0);
+          g.gain.setValueAtTime(vol, t0);
+          g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start(t0);
+          o.stop(t0 + dur + 0.02);
+        };
+        if (kind === 'hit') play(150, 0.16, 'sawtooth', 0.06);
+        else if (kind === 'block') play(460, 0.1, 'triangle', 0.05);
+        else if (kind === 'deny') play(200, 0.08, 'square', 0.03);
+        else if (kind === 'win') { [523, 659, 784].forEach((f, i) => play(f, 0.16, 'sine', 0.06, i * 0.13)); }
+        else if (kind === 'lose') { [340, 270, 200].forEach((f, i) => play(f, 0.2, 'sine', 0.06, i * 0.15)); }
+      } catch (e) { /* 音频不可用时静默 */ }
+    }
+
+    addFloat(x, y, text, color) {
+      this.floats.push({ x, y, text, color, at: this.time.now });
+    }
+
+    renderFloats() {
+      const now = this.time.now;
+      this.floats = this.floats.filter((f) => now - f.at < 900);
+      this.floats.forEach((f) => {
+        const age = now - f.at;
+        const t = this.add.text(f.x, f.y - age * 0.045, f.text, {
+          fontFamily: FONT, fontSize: '24px', color: f.color,
+          stroke: '#05060a', strokeThickness: 4,
+        }).setOrigin(0.5).setDepth(8000);
+        this.tweens.add({ targets: t, alpha: 0, duration: Math.max(140, 900 - age), ease: 'Quad.easeIn' });
+      });
+    }
+
+    chooseReward(type) {
+      if (this.rewardLocked) return;
+      this.rewardLocked = true;
+      if (type) pickReward(this.run, type);
+      else this.run.wins++;
+      if (this.run.wins >= CONFIG.TOTAL_WINS) { this.rewardLocked = false; this.scheduleRender(); return; }
+      startFight(this.run, this.run.wins);
+      this.rewardLocked = false;
+      this.overSound = false;
+      this.floats = [];
+      this.scheduleRender();
+    }
+
+    restart() {
+      this.run = newRun(Date.now() & 0xffff);
+      startFight(this.run, 0);
+      this.overSound = false;
+      this.floats = [];
+      this.acting = false;
+      this.scheduleRender();
+    }
+  }
+
+  const game = new Phaser.Game({
+    type: Phaser.AUTO,
+    parent: 'game',
+    width: W,
+    height: H,
+    backgroundColor: '#14161f',
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    scene: [BattleScene],
+  });
+  Object.assign(window, { game });
+})();
+</script>
+</body>
+</html>
