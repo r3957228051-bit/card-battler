@@ -78,10 +78,19 @@
     },
   ];
 
+  const RELICS = [
+    { id: 'bloodstone', name: '血石', icon: '◆', desc: '每场战斗开始时回复 6 点生命', color: '#ff6b6b' },
+    { id: 'dagger', name: '锈匕首', icon: '†', desc: '攻击牌额外造成 2 点伤害', color: '#ffd54f' },
+    { id: 'amulet', name: '守夜护符', icon: '◇', desc: '每回合开始获得 3 点格挡', color: '#8ab4f8' },
+    { id: 'ember', name: '不熄余烬', icon: '✧', desc: '每回合多 1 点能量', color: '#ffb74d' },
+    { id: 'wolffang', name: '狼牙', icon: '☾', desc: '击败敌人后回复 10 点生命', color: '#b39ddb' },
+    { id: 'coin', name: '盗贼钱袋', icon: '♦', desc: '战斗奖励金币 +50%', color: '#f2c14e' },
+  ];
+
   const NODES = [
     { type: 'battle', enemy: 0, label: '地窖入口', icon: '⚔' },
     { type: 'event', label: '迷雾岔路', icon: '?' },
-    { type: 'battle', enemy: 1, label: '腐木林', icon: '⚔' },
+    { type: 'battle', enemy: 1, label: '腐木林', icon: '⚔', elite: true },
     { type: 'rest', label: '篝火', icon: '♨' },
     { type: 'shop', label: '漂泊商人', icon: '◆' },
     { type: 'battle', enemy: 2, label: '龙巢', icon: '☠', boss: true },
@@ -210,6 +219,7 @@
       hp: CONFIG.MAX_HP, maxHp: CONFIG.MAX_HP,
       gold: 10, strength: 0,
       deck: [],
+      relics: [],
       phase: 'title',
       nodes: NODES.map((n) => ({ ...n, done: false })),
       nodeIdx: 0,
@@ -228,6 +238,13 @@
     return run;
   }
 
+  function hasRelic(run, id) { return run.relics.indexOf(id) >= 0; }
+
+  function addRelic(run, id) {
+    if (hasRelic(run, id)) return;
+    run.relics.push(id);
+  }
+
   function enemyOf(idx) {
     return ENEMIES[Math.min(idx, ENEMIES.length - 1)];
   }
@@ -238,6 +255,7 @@
 
   // ── 战斗 ───────────────────────────────────────────────────
   function startBattle(run, enemyIdx) {
+    if (hasRelic(run, 'bloodstone')) run.hp = Math.min(run.maxHp, run.hp + 6);
     const e = enemyOf(enemyIdx);
     run.battle = {
       enemyIdx,
@@ -264,8 +282,8 @@
   function beginTurn(run) {
     const b = run.battle;
     b.turn++;
-    b.block = 0;
-    b.energy = CONFIG.ENERGY;
+    b.block = hasRelic(run, 'amulet') ? 3 : 0;
+    b.energy = CONFIG.ENERGY + (hasRelic(run, 'ember') ? 1 : 0);
     if (b.enemyVuln > 0) b.enemyVuln--;
     if (b.playerWeak > 0) b.playerWeak--;
     drawCards(run, CONFIG.DRAW);
@@ -296,7 +314,7 @@
   function applyOp(run, op) {
     const b = run.battle;
     if (op.k === 'damage') {
-      let dmg = attackDamage(run, op.v);
+      let dmg = attackDamage(run, op.v + (hasRelic(run, 'dagger') ? 2 : 0));
       if (b.enemyVuln > 0) dmg = Math.floor(dmg * CONFIG.VULN_MULT);
       const absorbed = Math.min(b.enemyBlock, dmg);
       b.enemyBlock -= absorbed;
@@ -427,9 +445,13 @@
       run.phase = 'rest';
     } else if (node.type === 'shop') {
       const pool = shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3);
+      const relicPool = RELICS.filter((r) => run.relics.indexOf(r.id) < 0);
       run.shop = {
         cards: pool.map((t, i) => ({ type: t, price: 40 + i * 10, bought: false })),
+        relic: relicPool.length ? relicPool[Math.floor(run.rng() * relicPool.length)].id : null,
+        relicBought: false,
         healBought: false,
+        refreshCount: 0,
       };
       run.phase = 'shop';
     }
@@ -443,12 +465,23 @@
       return;
     }
     const node = currentNode(run);
-    const gold = node && node.boss ? CONFIG.GOLD_ELITE : CONFIG.GOLD_WIN;
+    let gold = node && node.boss ? CONFIG.GOLD_ELITE : CONFIG.GOLD_WIN;
+    if (node && node.elite) gold += 16;
+    if (hasRelic(run, 'coin')) gold = Math.floor(gold * 1.5);
+    if (hasRelic(run, 'wolffang')) run.hp = Math.min(run.maxHp, run.hp + 10);
     run.gold += gold;
     run.battle = null;
+    let relic = null;
+    if (node && node.elite) {
+      const owned = run.relics;
+      const pool = RELICS.filter((r) => owned.indexOf(r.id) < 0);
+      if (pool.length) relic = pool[Math.floor(run.rng() * pool.length)].id;
+    }
     run.reward = {
       gold,
       cards: shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3),
+      relic,
+      relicTaken: false,
       picked: false,
     };
     run.phase = 'reward';
@@ -520,6 +553,30 @@
     run.log = `买下「${CARD_DEFS[item.type].name}」。`;
   }
 
+  function refreshShop(run) {
+    if (run.phase !== 'shop' || !run.shop) return;
+    const cost = 1 + run.shop.refreshCount;
+    if (run.gold < cost) { run.log = '金币不够，刷不起了。'; return; }
+    run.gold -= cost;
+    run.shop.refreshCount++;
+    const pool = shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3);
+    run.shop.cards = pool.map((t, i) => ({ type: t, price: 40 + i * 10, bought: false }));
+    if (!run.shop.relicBought) {
+      const relicPool = RELICS.filter((r) => run.relics.indexOf(r.id) < 0);
+      run.shop.relic = relicPool.length ? relicPool[Math.floor(run.rng() * relicPool.length)].id : null;
+    }
+    run.log = `刷新了一次，花了 ${cost} 金。`;
+  }
+
+  function buyRelic(run) {
+    if (run.phase !== 'shop' || !run.shop || run.shop.relicBought || !run.shop.relic) return;
+    if (run.gold < 70) { run.log = '金币不够。'; return; }
+    run.gold -= 70;
+    run.shop.relicBought = true;
+    addRelic(run, run.shop.relic);
+    run.log = '买下了一件遗物。';
+  }
+
   function buyHeal(run) {
     if (run.shop.healBought || run.gold < 30) return;
     run.gold -= 30;
@@ -550,7 +607,7 @@
     CONFIG, KEYWORDS, CARD_DEFS, ENEMIES, EVENTS, NODES,
     newRun, enterNode, startBattle, playCard, endTurn, canPlay, battleIntent,
     finishBattle, pickReward, applyEventChoice, leaveEvent,
-    buyCard, buyHeal, leaveShop, restHeal, restRemove, advanceNode,
+    buyCard, buyHeal, buyRelic, refreshShop, leaveShop, restHeal, restRemove, advanceNode, hasRelic,
   };
 
   // ─────────────────────────────────────────────────────────────
@@ -768,10 +825,86 @@
           g.strokeRect(x + 2, y + 2, bw - 4, bh - 4);
         }
       }
-      g.fillStyle(0x3a2410, 0.22);
-      g.fillCircle(40, 320, 210);
-      g.fillCircle(W - 40, 320, 210);
+      // 暗角
+      g.fillStyle(0x000000, 0.32);
+      g.fillCircle(0, 0, 320);
+      g.fillStyle(0x000000, 0.22);
+      g.fillCircle(W, 0, 320);
+      g.fillCircle(0, H, 300);
+      g.fillCircle(W, H, 300);
+      this.torch(38, 360);
+      this.torch(W - 38, 360);
+      this.fog();
+      this.dust();
       return g;
+    }
+
+    torch(x, y) {
+      const c = this.add.container(x, y);
+      const glow = this.add.graphics();
+      glow.fillStyle(0xff8c1a, 0.08);
+      glow.fillCircle(0, -16, 210);
+      glow.fillStyle(0xff8c1a, 0.12);
+      glow.fillCircle(0, -16, 120);
+      const g = this.add.graphics();
+      g.fillStyle(0x2a1a0c, 1);
+      g.fillRect(-6, 4, 12, 84);
+      g.fillStyle(0x3a2410, 1);
+      g.fillRect(-9, 82, 18, 12);
+      g.fillStyle(0xff6b1a, 0.92);
+      g.fillCircle(0, -14, 24);
+      g.fillStyle(0xffa726, 1);
+      g.fillCircle(0, -20, 16);
+      g.fillStyle(0xffe082, 1);
+      g.fillCircle(0, -26, 8);
+      c.add([glow, g]);
+      this.tweens.add({ targets: c, scaleX: 1.06, scaleY: 1.14, duration: 320 + Math.random() * 160, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+      this.tweens.add({ targets: glow, alpha: 0.5, duration: 1400 + Math.random() * 600, yoyo: true, repeat: -1 });
+      return c;
+    }
+
+    fog() {
+      for (let i = 0; i < 3; i++) {
+        const f = this.add.ellipse(W * (0.25 + i * 0.25), 380 + i * 300, 560, 200, 0x2c3a5c, 0.05);
+        this.tweens.add({ targets: f, x: f.x + 110, duration: 9000 + i * 2400, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+      }
+    }
+
+    dust() {
+      for (let i = 0; i < 14; i++) {
+        const x = 30 + Math.random() * (W - 60);
+        const y = 160 + Math.random() * 980;
+        const p = this.add.rectangle(x, y, 3, 3, 0xffd9a0).setAlpha(0.2 + Math.random() * 0.2);
+        const drift = 40 + Math.random() * 60;
+        this.tweens.add({
+          targets: p, y: y - 160 - Math.random() * 200, x: x + (Math.random() - 0.5) * 50,
+          alpha: 0, duration: 5000 + Math.random() * 5000, repeat: -1, ease: 'Linear',
+          onRepeat: () => { p.y = y; p.x = x; p.alpha = 0.16; },
+        });
+      }
+    }
+
+    drawRelics(run, x, y) {
+      run.relics.forEach((id, i) => {
+        const r = RELICS.find((z) => z.id === id);
+        if (!r) return;
+        const g = this.add.graphics();
+        g.fillStyle(0x12151f, 0.96);
+        g.fillRoundedRect(-16, -16, 32, 32, 8);
+        g.lineStyle(1, Phaser.Display.Color.HexStringToColor(r.color).color, 0.8);
+        g.strokeRoundedRect(-16, -16, 32, 32, 8);
+        const t = this.text(0, 0, r.icon, 17, r.color);
+        const c = this.add.container(x + i * 42, y, [g, t]);
+        c.setSize(32, 32);
+        c.setInteractive(new Phaser.Geom.Rectangle(-16, -16, 32, 32), Phaser.Geom.Rectangle.Contains);
+        const show = () => this.showTip(c.x, c.y - 52, [
+          { text: r.name, color: r.color, size: 15 },
+          { text: r.desc, color: '#c9cde0' },
+        ]);
+        c.on('pointerover', show);
+        c.on('pointerdown', show);
+        c.on('pointerout', () => this.hideTip());
+      });
     }
 
     // ── 主渲染分派 ──────────────────────────────────────────
@@ -859,6 +992,9 @@
         this.text(180, y + 18, sub, 13, isDone ? '#3a4055' : '#8b90a6').setOrigin(0, 0.5);
 
         if (isCurrent) {
+          const pulse = this.add.rectangle(W / 2, y, W - 120, 96, 0x3b5bdb, 0);
+          pulse.setStrokeStyle(2, 0x8ab4f8);
+          this.tweens.add({ targets: pulse, alpha: 0.0, duration: 900, yoyo: true, repeat: -1 });
           const hit = this.add.zone(W / 2, y, W - 120, 96).setOrigin(0.5).setInteractive();
           hit.on('pointerdown', () => { this.sfx('tap'); enterNode(run); this.scheduleRender(); });
         }
@@ -868,6 +1004,7 @@
       this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
       this.text(W - 92, 46, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
       if (run.strength) this.text(W / 2, 60, `力量 +${run.strength}`, 15, '#ffd54f');
+      this.drawRelics(run, 40, 1180);
     }
 
     // ── 战斗 ────────────────────────────────────────────────
@@ -877,6 +1014,7 @@
 
       this.text(W / 2, 42, e.name, 22, COL.text);
       this.text(20, 84, `回合 ${b.turn}`, 15, COL.dim).setOrigin(0, 0.5);
+      this.drawRelics(run, 40, 128);
       this.text(W - 92, 46, `金币 ${run.gold}`, 15, COL.gold).setOrigin(1, 0.5);
 
       // 敌人
@@ -887,6 +1025,9 @@
       halo.fillCircle(L.enemy.x, L.enemy.y, L.enemy.r + 8);
       const img = this.add.image(L.enemy.x, L.enemy.y, e.icon).setDisplaySize(L.enemy.r * 2.1, L.enemy.r * 2.1);
       this.enemyImg = img;
+      const bs = img.scaleX, bsY = img.scaleY;
+      this.tweens.add({ targets: img, scaleX: bs * 1.03, scaleY: bsY * 0.97, duration: 1600, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+      this.tweens.add({ targets: halo, alpha: 0.55, duration: 2200, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
 
       this.text(L.enemy.x, L.enemy.y - L.enemy.r - 52, `HP ${b.enemyHp}/${b.enemyMax}`, 19, COL.text);
       this.bar(L.enemy.x - 130, L.enemy.y + L.enemy.r + 26, 260, 18, b.enemyHp / b.enemyMax, COL.red);
@@ -916,7 +1057,10 @@
       pg.fillCircle(p.x, p.y, p.r + 4);
       pg.lineStyle(2, 0x3fbf7f, 0.3);
       pg.strokeCircle(p.x, p.y, p.r + 4);
-      this.add.image(p.x, p.y, 'hero').setDisplaySize(p.r * 2.2, p.r * 2.2);
+      const hero = this.add.image(p.x, p.y, 'hero').setDisplaySize(p.r * 2.2, p.r * 2.2);
+      const hs = hero.scaleX, hsY = hero.scaleY;
+      this.tweens.add({ targets: hero, scaleX: hs * 1.025, scaleY: hsY * 0.975, duration: 1800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+      this.tweens.add({ targets: pg, alpha: 0.55, duration: 2000, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
 
       this.text(p.x, p.y - p.r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 19, COL.text);
       this.bar(p.x - 110, p.y + p.r + 20, 220, 16, run.hp / run.maxHp, COL.green);
@@ -987,12 +1131,12 @@
       r.cards.forEach((type, i) => {
         const d = CARD_DEFS[type];
         const card = { uid: -1 - i, type, name: d.name, cost: d.cost, type2: d.type, text: d.text, ops: d.ops, kw: d.kw };
-        this.cardView(card, startX + i * (cw + gap), 520, {
+        this.cardView(card, startX + i * (cw + gap), 560, {
           w: 150, h: 200, big: true,
           onClick: () => { pickReward(run, type); this.scheduleRender(); },
         });
       });
-      this.button(W / 2, 720, 200, 50, '跳过', () => { pickReward(run, null); this.scheduleRender(); }, 0x2a3550);
+      this.button(W / 2, 770, 200, 50, '跳过', () => { pickReward(run, null); this.scheduleRender(); }, 0x2a3550);
     }
 
     // ── 奇遇 ────────────────────────────────────────────────
@@ -1030,15 +1174,15 @@
     // ── 商店 ────────────────────────────────────────────────
     renderShop(run) {
       const shop = run.shop;
-      this.text(W / 2, 130, '漂泊商人', 30, COL.gold);
-      this.text(W / 2, 172, '「只收金币，不讲价。」', 15, COL.dim);
+      this.text(W / 2, 110, '漂泊商人', 30, COL.gold);
+      this.text(W / 2, 148, '「只收金币，不讲价。」', 15, COL.dim);
 
+      // 三张卡
       shop.cards.forEach((item, i) => {
         const d = CARD_DEFS[item.type];
         const card = { uid: -100 - i, type: item.type, name: d.name, cost: d.cost, type2: d.type, text: d.text, ops: d.ops, kw: d.kw };
-        const y = 380 + i * 0;
         const x = 200 + i * 160;
-        this.cardView(card, x, 400, {
+        this.cardView(card, x, 350, {
           w: 140, h: 190,
           onClick: () => {
             if (item.bought) return;
@@ -1048,20 +1192,45 @@
             this.scheduleRender();
           },
         });
-        this.text(x, 530, item.bought ? '已售出' : `${item.price} 金`, 16, item.bought ? '#4a5066' : COL.gold);
+        this.text(x, 476, item.bought ? '已售出' : `${item.price} 金`, 16, item.bought ? '#4a5066' : COL.gold);
       });
 
-      this.button(W / 2, 700, W - 160, 58, shop.healBought ? '热汤（已喝过）' : '热汤 · 25 生命 / 30 金', () => {
+      // 遗物
+      const relic = shop.relic ? RELICS.find((r) => r.id === shop.relic) : null;
+      if (relic) {
+        this.add.rectangle(W / 2, 580, W - 140, 76, 0x10141f, 0.95).setStrokeStyle(1, 0x2c3147);
+        this.text(150, 580, relic.icon, 26, relic.color);
+        this.text(200, 568, relic.name, 19, relic.color).setOrigin(0, 0.5);
+        this.text(200, 598, relic.desc, 13, '#c9cde0').setOrigin(0, 0.5);
+        this.button(W - 110, 580, 130, 52, shop.relicBought ? '已买' : '70 金', () => {
+          if (shop.relicBought || run.gold < 70) { this.sfx('deny'); return; }
+          buyRelic(run);
+          this.sfx('coin');
+          this.scheduleRender();
+        }, 0x7a4bd9, shop.relicBought || run.gold < 70);
+      }
+
+      // 热汤
+      this.button(W / 2, 676, W - 160, 54, shop.healBought ? '热汤（已喝过）' : '热汤 · 回复 25 生命 / 30 金', () => {
         if (shop.healBought || run.gold < 30) { this.sfx('deny'); return; }
         buyHeal(run);
         this.sfx('coin');
         this.scheduleRender();
       }, 0x2f6a4a, shop.healBought || run.gold < 30);
 
+      // 刷新
+      const cost = 1 + shop.refreshCount;
+      this.button(W / 2, 748, W - 160, 54, `刷新货架 · ${cost} 金`, () => {
+        if (run.gold < cost) { this.sfx('deny'); return; }
+        refreshShop(run);
+        this.sfx('coin');
+        this.scheduleRender();
+      }, 0x3b5bdb, run.gold < cost);
+
       this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
       this.text(W - 92, 46, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
-      if (run.log) this.text(W / 2, 800, run.log, 15, COL.gold);
-      this.button(W / 2, 880, 220, 54, '离开', () => { this.sfx('tap'); leaveShop(run); this.scheduleRender(); }, 0x2a3550);
+      if (run.log) this.text(W / 2, 830, run.log, 15, COL.gold);
+      this.button(W / 2, 900, 220, 54, '离开', () => { this.sfx('tap'); leaveShop(run); this.scheduleRender(); }, 0x2a3550);
     }
 
     // ── 篝火 ────────────────────────────────────────────────
