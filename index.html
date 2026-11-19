@@ -455,7 +455,7 @@
   }
 
   function pickReward(run, type) {
-    if (run.reward.picked) return;
+    if (run.phase !== 'reward' || !run.reward || run.reward.picked) return;
     run.reward.picked = true;
     if (type) run.deck.push(makeCard(type));
     advanceNode(run);
@@ -507,6 +507,7 @@
   }
 
   function leaveEvent(run) {
+    if (run.phase !== 'event') return;
     advanceNode(run);
   }
 
@@ -528,15 +529,18 @@
   }
 
   function leaveShop(run) {
+    if (run.phase !== 'shop') return;
     advanceNode(run);
   }
 
   function restHeal(run) {
+    if (run.phase !== 'rest') return;
     run.hp = Math.min(run.maxHp, run.hp + Math.floor(run.maxHp * 0.3));
     advanceNode(run);
   }
 
   function restRemove(run) {
+    if (run.phase !== 'rest') return;
     const i = run.deck.findIndex((c) => c.type === 'strike');
     if (i >= 0) run.deck.splice(i, 1);
     advanceNode(run);
@@ -653,7 +657,27 @@
           fontFamily: FONT, fontSize: `${ln.size || 14}px`, color: ln.color || '#e8eaf2',
         }).setOrigin(0, 0));
       });
-      this.tip = this.add.container(cx, ty, kids).setDepth(9999);
+      const tip = this.add.container(cx, ty, kids).setDepth(9999);
+      this.tip = tip;
+      this.time.delayedCall(3600, () => { if (this.tip === tip) this.hideTip(); });
+    }
+
+    soundButton() {
+      const g = this.add.graphics();
+      g.fillStyle(0x1a1f2c, 0.92);
+      g.fillRoundedRect(-26, -18, 52, 36, 8);
+      g.lineStyle(1, 0x2c3147, 1);
+      g.strokeRoundedRect(-26, -18, 52, 36, 8);
+      const t = this.text(0, 0, this.muted ? '✕' : '♪', 18, this.muted ? '#6b7088' : '#f2c14e');
+      const c = this.add.container(W - 46, 46, [g, t]);
+      c.setSize(52, 36);
+      c.setInteractive(new Phaser.Geom.Rectangle(-26, -18, 52, 36), Phaser.Geom.Rectangle.Contains);
+      c.on('pointerdown', () => {
+        this.muted = !this.muted;
+        if (this.master) this.master.gain.value = this.muted ? 0 : 1;
+        this.scheduleRender();
+      });
+      return c;
     }
 
     badge(x, y, key, stacks, prefix = '') {
@@ -755,6 +779,7 @@
       this.tweens.killAll();
       this.hideTip();
       this.input.removeAllListeners('pointerdown');
+      this.children.list.slice().forEach((o) => { if (o.input) o.disableInteractive(); });
       this.children.removeAll(true);
       this.cardViews = new Map();
 
@@ -772,6 +797,7 @@
       else if (run.phase === 'ending') this.renderEnding(run);
 
       this.renderFloats();
+      this.soundButton();
     }
 
     // ── 标题 ────────────────────────────────────────────────
@@ -840,7 +866,7 @@
 
       // 顶部状态
       this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
-      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
+      this.text(W - 92, 46, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
       if (run.strength) this.text(W / 2, 60, `力量 +${run.strength}`, 15, '#ffd54f');
     }
 
@@ -851,7 +877,7 @@
 
       this.text(W / 2, 42, e.name, 22, COL.text);
       this.text(20, 84, `回合 ${b.turn}`, 15, COL.dim).setOrigin(0, 0.5);
-      this.text(W - 20, 84, `金币 ${run.gold}`, 13, COL.gold).setOrigin(1, 0.5);
+      this.text(W - 92, 46, `金币 ${run.gold}`, 15, COL.gold).setOrigin(1, 0.5);
 
       // 敌人
       const halo = this.add.graphics();
@@ -998,7 +1024,7 @@
       }
 
       this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
-      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
+      this.text(W - 92, 46, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
     }
 
     // ── 商店 ────────────────────────────────────────────────
@@ -1033,7 +1059,7 @@
       }, 0x2f6a4a, shop.healBought || run.gold < 30);
 
       this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
-      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
+      this.text(W - 92, 46, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
       if (run.log) this.text(W / 2, 800, run.log, 15, COL.gold);
       this.button(W / 2, 880, 220, 54, '离开', () => { this.sfx('tap'); leaveShop(run); this.scheduleRender(); }, 0x2a3550);
     }
