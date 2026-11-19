@@ -4,11 +4,11 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="theme-color" content="#14161f" />
+<meta name="theme-color" content="#0d0f16" />
 <link rel="icon" href="data:," />
 <title>Card Battler</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #14161f; touch-action: manipulation; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0d0f16; touch-action: manipulation; }
   #game { width: 100%; height: 100%; }
   #game canvas { display: block; }
 </style>
@@ -20,9 +20,6 @@
 (() => {
   'use strict';
 
-  // ─────────────────────────────────────────────────────────────
-  // 竖屏 720×1280，手机优先
-  // ─────────────────────────────────────────────────────────────
   const W = 720;
   const H = 1280;
 
@@ -32,11 +29,9 @@
     DRAW: 5,
     HAND_CAP: 10,
     TOTAL_WINS: 3,
-    ENEMY_HP_BASE: 70,
-    ENEMY_HP_PER_TIER: 20,
-    ENEMY_ATK_PER_TIER: 3,
     VULN_MULT: 1.5,
     WEAK_MULT: 0.75,
+    HEAL_BETWEEN: 12,
   };
 
   const KEYWORDS = {
@@ -52,19 +47,20 @@
     defend: { name: '防御', cost: 1, type: 'skill', text: '获得 5 点格挡', ops: [{ k: 'block', v: 5 }], kw: ['block'] },
     bash: { name: '重击', cost: 2, type: 'attack', text: '造成 8 点伤害，施加 2 层易伤', ops: [{ k: 'damage', v: 8 }, { k: 'vuln', v: 2 }], kw: ['vuln'] },
     heavy: { name: '重斩', cost: 2, type: 'attack', text: '造成 14 点伤害', ops: [{ k: 'damage', v: 14 }], kw: [] },
+    cleave: { name: '横扫', cost: 2, type: 'attack', text: '造成 10 点伤害', ops: [{ k: 'damage', v: 10 }], kw: [] },
     guard: { name: '铁壁', cost: 2, type: 'skill', text: '获得 12 点格挡', ops: [{ k: 'block', v: 12 }], kw: ['block'] },
+    fortify: { name: '坚守', cost: 1, type: 'skill', text: '获得 8 点格挡', ops: [{ k: 'block', v: 8 }], kw: ['block'] },
     rage: { name: '战意', cost: 1, type: 'power', text: '获得 2 点力量', ops: [{ k: 'str', v: 2 }], kw: ['strength'] },
     weaken: { name: '削弱', cost: 1, type: 'attack', text: '造成 6 点伤害，施加 2 层虚弱', ops: [{ k: 'damage', v: 6 }, { k: 'weak', v: 2 }], kw: ['weak'] },
   };
 
-  const INTENT_BASE = [
-    { k: 'attack', v: 10 },
-    { k: 'weak', v: 2 },
-    { k: 'defend', v: 8 },
-    { k: 'silence', v: 1 },
-    { k: 'attack', v: 15 },
+  const ENEMIES = [
+    { key: 'slime', name: '黏液怪', icon: 'enemy-slime', hp: 70, atk: 10, tint: 0x4aa85e, intents: ['attack', 'weak', 'defend', 'silence', 'attack'] },
+    { key: 'wolf', name: '荒野狼', icon: 'enemy-wolf', hp: 90, atk: 12, tint: 0xb0854a, intents: ['attack', 'attack', 'weak', 'defend', 'attack'] },
+    { key: 'dragon', name: '幼龙', icon: 'enemy-dragon', hp: 110, atk: 15, tint: 0x5fae4a, intents: ['attack', 'defend', 'attack', 'silence', 'attack'] },
   ];
-  const REWARD_POOL = ['heavy', 'guard', 'rage', 'weaken'];
+
+  const REWARD_POOL = ['heavy', 'cleave', 'guard', 'fortify', 'rage', 'weaken'];
 
   // ─────────────────────────────────────────────────────────────
   // 规则引擎
@@ -110,20 +106,25 @@
     return run;
   }
 
+  function enemyOf(tier) {
+    return ENEMIES[Math.min(tier, ENEMIES.length - 1)];
+  }
+
   function getIntent(f) {
-    const b = INTENT_BASE[f.intentIdx % INTENT_BASE.length];
-    if (b.k === 'attack') return { k: 'attack', v: b.v + f.tier * CONFIG.ENEMY_ATK_PER_TIER };
-    if (b.k === 'defend') return { k: 'defend', v: b.v + f.tier * 2 };
-    if (b.k === 'weak') return { k: 'weak', v: b.v + (f.tier > 1 ? 1 : 0) };
-    return { k: b.k, v: b.v };
+    const e = enemyOf(f.tier);
+    const kind = e.intents[f.intentIdx % e.intents.length];
+    if (kind === 'attack') return { k: 'attack', v: e.atk };
+    if (kind === 'defend') return { k: 'defend', v: 8 + f.tier * 2 };
+    if (kind === 'weak') return { k: 'weak', v: 2 };
+    return { k: 'silence', v: 1 };
   }
 
   function startFight(run, tier) {
-    run.hp = Math.min(run.maxHp, run.hp + (tier > 0 ? 12 : 0));
-    const max = CONFIG.ENEMY_HP_BASE + tier * CONFIG.ENEMY_HP_PER_TIER;
+    run.hp = Math.min(run.maxHp, run.hp + (tier > 0 ? CONFIG.HEAL_BETWEEN : 0));
+    const e = enemyOf(tier);
     run.fight = {
       tier,
-      enemyHp: max, enemyMax: max,
+      enemyHp: e.hp, enemyMax: e.hp,
       enemyVuln: 0, enemyBlock: 0, enemyWeak: 0,
       playerWeak: 0, playerSilence: 0,
       intentIdx: 0, turn: 0, block: 0, energy: 0,
@@ -280,28 +281,28 @@
   }
 
   window.__cardProto = {
-    CONFIG, KEYWORDS, CARD_DEFS,
+    CONFIG, KEYWORDS, CARD_DEFS, ENEMIES,
     newRun, startFight, playCard, endTurn, beginTurn, getIntent, offerRewards, pickReward, canPlay,
   };
 
   // ─────────────────────────────────────────────────────────────
-  // 布局（竖屏）
+  // 表现层
   // ─────────────────────────────────────────────────────────────
   const FONT = "'PingFang SC','Microsoft YaHei',sans-serif";
   const COL = {
-    bg: 0x14161f,
+    bg: 0x0d0f16,
     text: '#e8eaf2',
     dim: '#8b90a6',
     gold: '#f2c14e',
     red: 0xd94545,
     green: 0x3fbf7f,
-    attack: 0xc74a3f,
-    skill: 0x2f6f9e,
-    power: 0x7a4bd9,
+    attack: 0x9e3b32,
+    skill: 0x2a5f86,
+    power: 0x6040b0,
   };
 
   const L = {
-    enemy: { x: W / 2, y: 330, r: 88 },
+    enemy: { x: W / 2, y: 330, r: 96 },
     player: { x: W / 2, y: 830, r: 70 },
     hand: { y: 1160, cw: 112, ch: 152, gap: 8 },
     endBtn: { x: W - 120, y: 690, w: 176, h: 56 },
@@ -309,8 +310,22 @@
     deckInfo: { y: 1250 },
   };
 
+  const ASSETS = {
+    'enemy-slime': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAACZElEQVR4nO3cIXKUQRQE4BiqOAAajoFBYRAIKEDg4C4cAMMVcCgUN0BQeERkbsAB4Ab7inoZXmb666qWyT87/cVs7ebq6vDcv/fgT6fT55dmAAgPAOEBIDwAhAeA8AAQHgAOTzXgt5v3F/vh57OLBeSOB4DwABAeAMIDQHgACA8A4QEgPACEB4DwABAeAMIDQHgACA8A4QHg8HQHBmDzABAeAMIDQHgACA8A4QEgPAAcnuqCr39/b7UauNvq/AAVASA8AIQHgPAAEB4AwgNAeAA4PKsHrvrxx4uLrQaufr7b44EAAAAAAAAAAAAAAAAAAAAAcBSA6YFXD7j69z/98u5i7zwQAAAAAAAAAAAAAAAAAAAAAI4CUB3g0/Xri+0OXD2/O0AXQHW+auCqr76+vNjlQAAAAAAAAAAAAAAAAAAAAAA4CsDqC14N4POvN0tbDVSd79Hbx61WANpAAAAAAAAAAAAAAAAAAAAAAADgFgF0P1CxO4CHz5+0WgHpng8AAAAAAAAAAAAAAAAAAAAAAG4TQLerB+4C6A4MAAAAAAAAAAAAAAAAAAAAAAA7Aag+kLD6gk4vAOEFILwAhBeA8AIQXgDCC0B4xwFUD5h+o2T3Vvc3/sUQAAAAAAAAAAAAAAAAAAAAAI4C0P0/gt0XMD3AdLt/YO2BAQAAAAAAAAAAAAAAAAAAAADgPwLptgK2+vmrOz4wAAAAAAAAAAAAAAAAAAAAAAD8Q6oXoJsPXGX6Anfv9H7tTF/g7p3er53pC9y90/u1M32Bu3d6v3amL3D3Tu/XzvQF7t7p/dqZvsDdu3qfv52WZHiOQRVXAAAAAElFTkSuQmCC',
+    'enemy-wolf': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAACvElEQVR4nO3doW5UURAG4EoEiqCrqSUER4MnQeAwEAykD4AiVW2CQjZ1CIInTSAhaJJKRF0FBt9XAIXsTJvZs3t75vuT3+4998y35ubc3a2t5edv0qV/vhQDQPMA0DwANA8AzQNA8wDQPABMnnAAn/Zfhr3CAMNe/DkNC8j4ANA8ADQPAM0DQPMA0DwANA8AkyfcwO8fD8O+2t0JWx1wdn0A6gGgeQBoHgCaB4DmAaB5AGgeACZPacDvnjwKWx3w6clxWAOuB4DmAaB5AGgeAJoHgOYBoHkAaJ7SgEa3Cmz0/qyhwwNAYX8AAAAAAAAAAAAAAAAAAACWB2DogG/fulNq9fpHb5+HrQ5g01+AVQABAAAAAAAAAAAAAAAAAAAAYCoApRsYPaCbPuDsBy4+vHla6sa/4QAAAAAAAAAAAAAAAAAAAAC0AlDt16O9sF8OXoddwYGPUrMXX549vB929PoAAAAAAAAAAAAAAAAAAAAAAOCaWcciL+29u9thswFUr5/9wMT7F4/DVq9//vMkLAAAAAAAAAAAAAAAAAAAAAAArBjA6IQ38GB7J2z2oKn6x5OjB5yt/+zH57AAAAAAAAAAAAAAAAAAAAAAALAwAOECsz+GzF7syB7UZBtc7e9f34Z2HS+GjA4AAAAAAAAAAAAAAAAAAAAAAPxvduAjA5JtUHXAGbDsxZXsQEf7Ax8AAAAAAAAAAAAAAAAAAAAAzAYgSwlIdmAkOxCSAch+gCJbX3Z/Mxz4qAYAAAAAAAAAAAAAAAAAAACAqQCEN7CCAw8lQBmA6vWzB0XVF1c2PdyrBAAAAAAAAAAAAAAAAAAAAICpAIQLzF7sqALIBpwduFjDg5gqosUHgML+AAAAAAAAAAAAAAAAAAAA3DwAWUZvQPXzpx/ApgNA8wDQPAA0DwDNA0DzANA8ACw4/wBUhNwArJt9IQAAAABJRU5ErkJggg==',
+    'enemy-dragon': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAADB0lEQVR4nO3dr2tWYRQH8CVBBEUQYWKTWRRBg0xQBxaHCjoURFcG+g8YTSLMYPEHiEFmNGoTVgTBKFgsBqMDg8GwZHBG2zmM4/U+z/t+Dnzjve+553x4w8PLfWdmRq6dOw5sRRm7v6yy/nt/vsGr9wEBUKzeBwRAsXofEADF6n1AABSr9wEBUKzeBwRAsXofEABJZQP4+eFemOz6t5+Xw1QXkF2/ubEWBgAAAAAAAAAAAAAAAAAAAAAAAPibm6sLYbIFz98/HebIjZNhqgv++uhWGAAAAAAAAAAAAAAAAAAAAAAAmCQA2QM+eHcpzPq3lTDZgrP7VzP1C84KAAAAAAAAAAAAAAAAAAAAAAC2AaD3AAAAAAAAAAAAAAAAAAAAAADAJAHIHvD75uswYwP5vbUVptrf8TsLYbL7VwMAAAAAAAAAAAAAAAAAAAAAAP8TwKHFq2HGBrB71+EwZQB3L4TJ7n/+yXyYl58uhhkcCAAAAAAAAAAAAAAAAAAAAAATBWDsBe3cM1vK0P1VF5wdFO09dTRM9oKLK0+XwqRAAAAAAAAAAAAAAAAAAAAAAJgqAK2fEwydbID7ZufCDA0gu395wQAAAAAAAAAAAAAAAAAAAAAA8A+BZAPMBjB0Di6eCHP24bkwr75cC1NdUHb944+Xw4z+DQEAAAAAAAAAAAAAAAAAAADARAGoPsD6s6VRkx3UZAdJ2Q9Gsj++zOZT/XwAAAAAAAAAAAAAAAAAAAAAAGgJwObGWphfP14MmmzAY6f5BQMAAAAAAAAAAAAAAAAAAAAwVQCyBrIfZLx5f3vQLK+cCVNe0MAHSdkLIgAAAAAAAAAAAAAAAAAAAAAAoCUA1YOM56vXSxn6RZPp8ydAsoy+YAAAAAAAAAAAAAAAAAAAAAAA2AaA7CCoOoBqhv5Dhv1zx8I0v+CsAAAAAAAAAAAAAAAAAAAAAJgqAFlVFzTt/XVfrQ+49f66r9YH3Hp/3VfrA269v+6r9QG33l/31fqAW++v+2p9wK331321PuDW+xu6/gBKpOHegazGkwAAAABJRU5ErkJggg==',
+    'icon-attack': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAACLklEQVR4nO3cvyrFcRyH8bOpU8oiA4cznBKjlM6krDpyB2LQKQtlUmK0Mhit7sDE7ALsBosLUFbu4P0dfp1+f57nqfeo9Pu8pm/S67W+ub/ZzhqeAOAJAJ4A4AkAngDgCQCeADpePtD71WHcw/5G3NFoJU4gtScAeAKAJwB4AoAnAHgCgCcAePkAk+Fq3N7SctxafyFOALUnAHgCgCcAeAKAJwB4AoAnAIvlA12PB3ElIAJofAKAJwB4AoAnAHgCgCcAeAKAlw/kQ1DnEwA8AcATADwBwBMAPAHAE0DLK33gvNIfhFR9CKoORECFBABPAPAEAE8A8AQATwDwBNDx8gd4Ox9XWukfRJR+/uVsJ266NYgrASoBBQARgAAEIAABCEAAAhCAAAQgAAGgAJQqfYC8g8lF3Gi4HTffX4yr+vt54GICgCcAeAKAJwB4AoAnAHgCsFj+gF/fv3HHJzdxm+u7cR6w9gQATwDwBABPAPAEAE8A8AQALx/g4/MnrgSg9FAkgNoTADwBwBMAPAHAEwA8AcATALzZAvAhqPEJAJ4A4AkAngDgCQCeAOAJAN5sAfgQ1PgEAE8A8AQATwDwBABPAPAEYLF8oMen1zgBtD4BwBMAPAHAEwA8AcATADwBWCwf8PbuOU4grU8A8AQATwDwBABPAPAEAE8AFssHPL28jxNA6xMAPAHAEwA8AcATADwBwBOAxUoHFkDHEwA8AcATADwBwBMAPAHA6zaAfwiA2wNcRZ46AAAAAElFTkSuQmCC',
+    'icon-skill': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAClUlEQVR4nO3dr2uVYRjH4SXLxC2K4CZs4YAGDVaDaDJYBcHBZCwYZEWLP4paFSyzDYuYjIKsWezWNavNP0Db4v2Ex/fczzn39YVPXDjvfaWXs21lZfid+Vu78ss+QHbll32A7Mov+wDZlV/2AbIrv+wDZFd+2QfIrvyyD5Dd8Jv2Adyfne/qw92tofv+7HbYAgABAAAAAAAAAAAAAAAAAAAAYKkA9B3oy72NsCvr62HZB5q63eubYQMAAQAAAAAAAAAAAAAAAAAAAACA07ZX18JaQLIBzGa3wi6euxSWDQgAAAAAAAAAAAAAAAAAAAAAAOYJoHXg1geYGkDrwC9OfoXtv/wWlg0EAAAAAAAAAAAAAAAAAAAAAAAWCUDrRVLr5zcuXA178ORzWOvAN27uhbWArZ3dDAMAAAAAAAAAAAAAAAAAAAAAgEoApn4R1HpR0zpwC9jUBwYAAAAAAAAAAAAAAAAAAAAAAAD+X60DZh8YAAAAAAAAAAAAAAAAAAAAAABGAtD7ByJ6vxDSWy/g7AAAAAAAAAAAAAAAAAAAAAAAYJ4AWg/weGcrLPtFUDaw3gAYPAAAAAAAAAAAAAAAAAAAgCUD0PrHh61fzFDcHA4MwMgBUDwAigdA8QAoHgDFA6B4wwNofYCTH0dD9+f3z6EDAAAAAAAAAAAAAAAAAAAAAIBFAvD68cOwy9fi7ux/DTv+9C7s8P3bsI9Hr8IOnr4J2zno69Hzw7DhvxACAAAAAAAAAAAAAAAAAAAAwJIBmBZIL4Cpf/Fi9AAY4AgAAAAAAAAAAAAAAAAAAAClAPQB6QXQfgDL3vADAAAAAAAAAAAAAAAAAAAAoBSA1so/gOoDoPgAKD4Aig+A4gOg+AAoPgAy9w+Hv3w8Q4+FEwAAAABJRU5ErkJggg==',
+    'icon-power': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAACjElEQVR4nO3dr2uVYRTA8TGMLthuEBbMBjGYLKbBkkFW/QGDJatgkGFaEywGvV3XZTAwLA1hmHRDk0FBEWE4MOp/8DziuS/P+7znc+AbLy/3nE+6XO5dWhp4zi1f+KP/b+j7DD6tF9h7re8XntYL7L3W9wtP6wX2Xuv7haf1Anuv9f3C03qBvdf6fuFpvcDea32/8LReYO+1vl91am/gxs3HoX78/JW60QMBAAAAAAAAAAAAAAAAAAAAYFIAogfefv6hGAAjBwLAuAMgeQAkD4DkAZA8AJIHQPIAqFR7/u7h92IbW/NQAAAAAAAAAAAAAAAAAAAAAAAAwOIAPH19XGzv6KzY+p2dYkMfEAAAAAAAAAAAAAAAAAAAAAAAAPh3AJuPdosBAAAAAAAAAAAAAAAAAAAAAAAAeQDUvvDRGkD0/QMAAAAAAAAAAAAAAAAAAAAAwJQAvDv5EurW3SfFduZvQz14Vi56YAAAAAAAAAAAAAAAAAAAAAAA6AlAdEFRALUFXlm7P2jRAwMAAAAAAAAAAAAAAAAAAAAAAACLA9B7AAAAAAAAAAAAAAAAAAAAAAAwJQCv9o9VCIDkAZA8AJIHQPIASB4AyQMgec0BnF9ZLXZxdrnYbHZdhWr7B2DiAZA8AJIHQPIASB4AyQMgeaMHsLZ6qdib21eLvT94Wezb15NQnz8dhfp9+rFpAAAAAAAAAAAAAAAAAAAAAADQE4DaBx3X1jeL1X7osfb6ja15qHsPX4w6AAAAAAAAAAAAAAAAAAAAAABYJIAokNoXRmpAan/sWHv+1Bv8wACMu9b3BwAAAAAAAAAAAAAAAADSAahN+gVkHwCSDwDJB4DkA0DyASD5AJB8ABj3/AWYYnryhd6ZfAAAAABJRU5ErkJggg==',
+    'hero': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAABVUlEQVR4nGNgQAGs/xlwApAcDONVgF3u0wxjMH67zAmbOtb/u84+xmEA6/+9GmpgvF5O8/+3NE2wQWhqWf+3Td+GxQDW/3rmAWAsKCgDlgcZ8ilc4f+3Zjtk9dgMYP2//cC5/+fuvvq/YMPO/8EZrf+lxFThhoAwHgNY/xe1L0TBqjoOcAOwhBemAW7+CWBbQezQ+HIwjTAAS0BhMyC+sA0sBjMIhK0cE7DHArYwAAUcDIM0di8/Co4tmMEoBnipasFtgYU4LAZAbFAYpObXgWkQRglAUOL4czH2/8Niw/9WUiJgSZAtINtALnOOzIcbysYiBMYoBoD9JiXyX1bZCO4KELu0czo4LGA2gmIDpxdgIQyjQbb4qEn/TzKV/y8lKA73Bkgzihdgzqlw1kCJY1CggVwBcjooHJBdhzMqkaMR5BKYv0E0yPmwAMWiGZtBqAbish0AZ2ggcVHDIi0AAAAASUVORK5CYII=',
+  };
+
   class BattleScene extends Phaser.Scene {
     constructor() { super('battle'); }
+
+    preload() {
+      Object.entries(ASSETS).forEach(([k, v]) => this.load.image(k, v));
+    }
 
     create() {
       this.run = newRun(20261119);
@@ -334,23 +349,28 @@
 
     bar(x, y, w, h, ratio, color) {
       const g = this.add.graphics();
-      g.fillStyle(0x2a2d3a, 1);
+      g.fillStyle(0x1c2030, 1);
       g.fillRoundedRect(x, y, w, h, h / 2);
       const rw = Math.max(0, Math.min(1, ratio)) * w;
-      if (rw > 0) { g.fillStyle(color, 1); g.fillRoundedRect(x, y, rw, h, h / 2); }
+      if (rw > 0) {
+        g.fillStyle(color, 1);
+        g.fillRoundedRect(x, y, rw, h, h / 2);
+      }
       return g;
     }
 
-    button(x, y, w, h, label, onClick) {
+    button(x, y, w, h, label, onClick, tone = 0x3b5bdb) {
       const g = this.add.graphics();
-      g.fillStyle(0x3b5bdb, 1);
+      g.fillStyle(tone, 1);
       g.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
+      g.lineStyle(2, 0xffffff, 0.16);
+      g.strokeRoundedRect(-w / 2, -h / 2, w, h, 10);
       const t = this.text(0, 0, label, 18, '#ffffff');
       const c = this.add.container(x, y, [g, t]);
       c.setSize(w, h);
       c.setInteractive(new Phaser.Geom.Rectangle(-w / 2, -h / 2, w, h), Phaser.Geom.Rectangle.Contains);
-      c.on('pointerover', () => g.clear().fillStyle(0x4c6ef5, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
-      c.on('pointerout', () => g.clear().fillStyle(0x3b5bdb, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
+      c.on('pointerover', () => g.clear().fillStyle(Phaser.Display.Color.ValueToColor(tone).brighten(14).color, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
+      c.on('pointerout', () => g.clear().fillStyle(tone, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
       c.on('pointerdown', onClick);
       return c;
     }
@@ -361,7 +381,7 @@
 
     showTip(cx, cy, lines) {
       this.hideTip();
-      const w = 320;
+      const w = 330;
       const pad = 12;
       const lh = 21;
       const h = pad * 2 + lines.length * lh;
@@ -369,7 +389,7 @@
       if (ty - h / 2 < 8) ty = h / 2 + 8;
       if (ty + h / 2 > H - 8) ty = H - h / 2 - 8;
       const bg = this.add.graphics();
-      bg.fillStyle(0x0b0d15, 0.97);
+      bg.fillStyle(0x080a10, 0.98);
       bg.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
       bg.lineStyle(1, 0x39405e, 1);
       bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 10);
@@ -390,9 +410,9 @@
     badge(x, y, key, stacks, prefix = '') {
       const k = KEYWORDS[key];
       const g = this.add.graphics();
-      g.fillStyle(0x1a1d2b, 1);
+      g.fillStyle(0x12151f, 1);
       g.fillCircle(0, 0, 19);
-      g.lineStyle(2, 0xffffff, 0.18);
+      g.lineStyle(2, 0xffffff, 0.14);
       g.strokeCircle(0, 0, 19);
       g.lineStyle(2, Phaser.Display.Color.HexStringToColor(k.color).color, 1);
       g.strokeCircle(0, 0, 19);
@@ -401,19 +421,14 @@
       const c = this.add.container(x, y, [g, t]);
       c.setSize(38, 38);
       c.setInteractive(new Phaser.Geom.Rectangle(-19, -19, 38, 38), Phaser.Geom.Rectangle.Contains);
-      c.on('pointerdown', (p, lx, ly) => {
-        p.event && p.event.stopPropagation && p.event.stopPropagation();
+      const show = () => {
         this.showTip(x, y - 56, [
           { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
           { text: k.desc, color: '#c9cde0' },
         ]);
-      });
-      c.on('pointerover', () => {
-        this.showTip(x, y - 56, [
-          { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
-          { text: k.desc, color: '#c9cde0' },
-        ]);
-      });
+      };
+      c.on('pointerover', show);
+      c.on('pointerdown', show);
       c.on('pointerout', () => this.hideTip());
       return c;
     }
@@ -425,22 +440,29 @@
       const cont = this.add.container(x, y);
       const g = this.add.graphics();
       const fill = card.type2 === 'attack' ? COL.attack : card.type2 === 'power' ? COL.power : COL.skill;
-      g.fillStyle(fill, opts.disabled ? 0.35 : 1);
+      g.fillStyle(0x0a0c12, 1);
       g.fillRoundedRect(-cw / 2, -ch / 2, cw, ch, 10);
-      g.lineStyle(2, opts.disabled ? 0x8a6b2a : 0xffffff, opts.disabled ? 1 : 0.22);
+      g.fillStyle(fill, opts.disabled ? 0.4 : 0.94);
+      g.fillRoundedRect(-cw / 2 + 2, -ch / 2 + 2, cw - 4, ch - 4, 9);
+      g.lineStyle(2, opts.disabled ? 0x8a6b2a : 0xffffff, opts.disabled ? 1 : 0.28);
       g.strokeRoundedRect(-cw / 2, -ch / 2, cw, ch, 10);
       cont.add(g);
 
-      cont.add(this.text(0, -ch / 2 + 22, card.name, opts.big ? 20 : 16, '#ffffff'));
-      cont.add(this.text(-cw / 2 + 15, -ch / 2 + 17, String(card.cost), 16, COL.gold));
-      const body = this.add.text(0, 6, card.text, {
-        fontFamily: FONT, fontSize: `${opts.big ? 14 : 12}px`, color: '#ffffff',
-        align: 'center', wordWrap: { width: cw - 20 },
+      const iconKey = card.type2 === 'attack' ? 'icon-attack' : card.type2 === 'power' ? 'icon-power' : 'icon-skill';
+      const icon = this.add.image(-cw / 2 + 22, -ch / 2 + 24, iconKey).setDisplaySize(26, 26);
+      icon.setAlpha(opts.disabled ? 0.5 : 1);
+      cont.add(icon);
+      cont.add(this.text(cw / 2 - 16, -ch / 2 + 20, String(card.cost), 18, COL.gold));
+      cont.add(this.text(0, -ch / 2 + 54, card.name, opts.big ? 20 : 16, '#ffffff'));
+
+      const body = this.add.text(0, 10, card.text, {
+        fontFamily: FONT, fontSize: `${opts.big ? 14 : 12}px`, color: '#fff4e6',
+        align: 'center', wordWrap: { width: cw - 18 },
       }).setOrigin(0.5);
       cont.add(body);
+
       const tag = card.type2 === 'attack' ? '攻击' : card.type2 === 'power' ? '能力' : '技能';
       cont.add(this.text(0, ch / 2 - 16, tag, 11, '#ffffff'));
-
       if (opts.disabled) cont.add(this.text(0, ch / 2 - 38, '不可用', 11, '#ffcf70'));
 
       cont.setSize(cw, ch);
@@ -466,22 +488,93 @@
       return cont;
     }
 
-    // ── 主渲染 ──────────────────────────────────────────────
+    drawBackground() {
+      const g = this.add.graphics();
+      g.fillStyle(COL.bg, 1);
+      g.fillRect(0, 0, W, H);
+      g.lineStyle(1, 0x171c29, 1);
+      for (let x = 0; x <= W; x += 72) g.lineBetween(x, 0, x, H);
+      for (let y = 0; y <= H; y += 72) g.lineBetween(0, y, W, y);
+      g.fillStyle(0x161d33, 0.6);
+      g.fillCircle(L.enemy.x, L.enemy.y + 40, 195);
+      g.fillStyle(0x11261f, 0.5);
+      g.fillCircle(L.player.x, L.player.y + 40, 170);
+      return g;
+    }
+
+    drawEnemy(f) {
+      const e = enemyOf(f.tier);
+      const { x: cx, y: cy, r } = L.enemy;
+
+      const halo = this.add.graphics();
+      halo.fillStyle(e.tint, 0.1);
+      halo.fillCircle(cx, cy, r + 20);
+      halo.fillStyle(e.tint, 0.16);
+      halo.fillCircle(cx, cy, r + 8);
+
+      const img = this.add.image(cx, cy, e.icon).setDisplaySize(r * 2.1, r * 2.1);
+      this.enemyImg = img;
+
+      this.text(cx, cy - r - 52, `${e.name} · HP ${f.enemyHp}/${f.enemyMax}`, 19, COL.text);
+      this.bar(cx - 130, cy + r + 26, 260, 18, f.enemyHp / f.enemyMax, COL.red);
+
+      const intent = getIntent(f);
+      const intentMap = {
+        attack: `意图：攻击 ${intent.v}`,
+        defend: `意图：防御 ${intent.v}`,
+        weak: `意图：施加 ${intent.v} 层虚弱`,
+        silence: '意图：沉默',
+      };
+      this.text(cx, cy + r + 62, intentMap[intent.k] || '', 19, intent.k === 'attack' ? '#ff8a80' : '#ffd54f');
+      if (intent.k === 'silence') this.text(cx, cy + r + 90, '（本回合不能出攻击牌）', 13, '#8b90a6');
+
+      const badges = [];
+      if (f.enemyVuln > 0) badges.push(['vuln', f.enemyVuln]);
+      if (f.enemyWeak > 0) badges.push(['weak', f.enemyWeak]);
+      if (f.enemyBlock > 0) badges.push(['block', f.enemyBlock]);
+      const bx0 = cx - ((badges.length - 1) * 46) / 2;
+      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 128, k, v, '敌人：'));
+    }
+
+    drawPlayer(run, f) {
+      const { x: cx, y: cy, r } = L.player;
+      const g = this.add.graphics();
+      g.fillStyle(0x12302a, 0.5);
+      g.fillCircle(cx, cy, r + 4);
+      g.lineStyle(2, 0x3fbf7f, 0.3);
+      g.strokeCircle(cx, cy, r + 4);
+      this.add.image(cx, cy, 'hero').setDisplaySize(r * 2.2, r * 2.2);
+
+      this.text(cx, cy - r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 19, COL.text);
+      this.bar(cx - 110, cy + r + 20, 220, 16, run.hp / run.maxHp, COL.green);
+      this.text(cx - 70, cy + r + 52, `能量 ${f.energy}/${CONFIG.ENERGY}`, 17, COL.gold);
+      if (f.block > 0) this.text(cx + 70, cy + r + 52, `格挡 ${f.block}`, 17, '#8ab4f8');
+
+      const badges = [];
+      if (f.playerWeak > 0) badges.push(['weak', f.playerWeak]);
+      if (f.playerSilence > 0) badges.push(['silence', f.playerSilence]);
+      if (run.strength > 0) badges.push(['strength', run.strength]);
+      if (f.block > 0) badges.push(['block', f.block]);
+      const bx0 = cx - ((badges.length - 1) * 46) / 2;
+      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 100, k, v, '你：'));
+    }
+
     render() {
       this.tweens.killAll();
       this.hideTip();
       this.children.removeAll(true);
       this.cardViews = new Map();
+      this.enemyImg = null;
 
       const run = this.run;
       const f = run.fight;
 
-      this.add.rectangle(W / 2, H / 2, W, H, COL.bg);
+      this.drawBackground();
 
       this.text(W / 2, 42, `第 ${run.wins + 1} 场 / 共 ${CONFIG.TOTAL_WINS} 场`, 22, COL.text);
       this.text(20, 84, `回合 ${f.turn}`, 15, COL.dim).setOrigin(0, 0.5);
       this.text(W - 20, 84, `种子 ${run.seed}`, 13, COL.dim).setOrigin(1, 0.5);
-      this.button(76, 84, 104, 36, '? 词条', () => this.toggleGlossary());
+      this.button(76, 84, 104, 36, '? 词条', () => this.toggleGlossary(), 0x2a3550);
 
       this.drawEnemy(f);
       this.drawPlayer(run, f);
@@ -517,69 +610,8 @@
       this.renderFloats();
     }
 
-    drawEnemy(f) {
-      const { x: cx, y: cy, r } = L.enemy;
-      const g = this.add.graphics();
-      g.fillStyle(0x3a2f4a, 1);
-      g.fillCircle(cx, cy, r);
-      g.lineStyle(3, 0x6b4fa8, 1);
-      g.strokeCircle(cx, cy, r);
-      g.fillStyle(0xffdd66, 1);
-      g.fillCircle(cx - r * 0.33, cy - r * 0.14, r * 0.12);
-      g.fillCircle(cx + r * 0.33, cy - r * 0.14, r * 0.12);
-      g.lineStyle(4, 0x6b4fa8, 1);
-      g.beginPath();
-      g.arc(cx, cy + r * 0.22, r * 0.36, 0.15 * Math.PI, 0.85 * Math.PI, false);
-      g.strokePath();
-
-      this.text(cx, cy - r - 46, `敌人 · HP ${f.enemyHp}/${f.enemyMax}`, 18, COL.text);
-      this.bar(cx - 120, cy + r + 22, 240, 16, f.enemyHp / f.enemyMax, COL.red);
-
-      const intent = getIntent(f);
-      const intentMap = {
-        attack: `意图：攻击 ${intent.v}`,
-        defend: `意图：防御 ${intent.v}`,
-        weak: `意图：施加 ${intent.v} 层虚弱`,
-        silence: '意图：沉默',
-      };
-      this.text(cx, cy + r + 56, intentMap[intent.k] || '', 18, intent.k === 'attack' ? '#ff8a80' : '#ffd54f');
-      if (intent.k === 'silence') this.text(cx, cy + r + 82, '（本回合不能出攻击牌）', 13, '#8b90a6');
-
-      const badges = [];
-      if (f.enemyVuln > 0) badges.push(['vuln', f.enemyVuln]);
-      if (f.enemyWeak > 0) badges.push(['weak', f.enemyWeak]);
-      if (f.enemyBlock > 0) badges.push(['block', f.enemyBlock]);
-      const bx0 = cx - ((badges.length - 1) * 46) / 2;
-      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 120, k, v, '敌人：'));
-    }
-
-    drawPlayer(run, f) {
-      const { x: cx, y: cy, r } = L.player;
-      const g = this.add.graphics();
-      g.fillStyle(0x223a33, 1);
-      g.fillCircle(cx, cy, r);
-      g.lineStyle(3, 0x3fbf7f, 1);
-      g.strokeCircle(cx, cy, r);
-      g.fillStyle(0xbfe8d6, 1);
-      g.fillCircle(cx - r * 0.32, cy - r * 0.14, r * 0.1);
-      g.fillCircle(cx + r * 0.32, cy - r * 0.14, r * 0.1);
-
-      this.text(cx, cy - r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 18, COL.text);
-      this.bar(cx - 110, cy + r + 20, 220, 16, run.hp / run.maxHp, COL.green);
-      this.text(cx - 70, cy + r + 52, `能量 ${f.energy}/${CONFIG.ENERGY}`, 17, COL.gold);
-      if (f.block > 0) this.text(cx + 70, cy + r + 52, `格挡 ${f.block}`, 17, '#8ab4f8');
-
-      const badges = [];
-      if (f.playerWeak > 0) badges.push(['weak', f.playerWeak]);
-      if (f.playerSilence > 0) badges.push(['silence', f.playerSilence]);
-      if (run.strength > 0) badges.push(['strength', run.strength]);
-      if (f.block > 0) badges.push(['block', f.block]);
-      const bx0 = cx - ((badges.length - 1) * 46) / 2;
-      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 100, k, v, '你：'));
-    }
-
     drawGlossary() {
-      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.8).setInteractive();
+      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.82).setInteractive();
       this.text(W / 2, 250, '词条说明', 28, COL.gold);
       this.text(W / 2, 292, '点卡牌、状态徽章也能看到解释', 14, COL.dim);
       const keys = Object.keys(KEYWORDS);
@@ -599,7 +631,7 @@
         this.text(W / 2 - 250, y, k.name, 17, k.color).setOrigin(0, 0.5);
         this.text(W / 2 - 188, y, k.desc, 15, '#c9cde0').setOrigin(0, 0.5);
       });
-      this.button(W / 2, top + keys.length * rowH + 26, 180, 50, '关闭', () => this.toggleGlossary());
+      this.button(W / 2, top + keys.length * rowH + 26, 180, 50, '关闭', () => this.toggleGlossary(), 0x2a3550);
     }
 
     toggleGlossary() {
@@ -609,20 +641,20 @@
 
     drawOverlay(f) {
       if (!this.overSound) { this.overSound = true; this.sfx(f.result === 'lose' ? 'lose' : 'win'); }
-      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.7).setInteractive();
+      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.72).setInteractive();
       const run = this.run;
 
       if (f.result === 'lose') {
         this.text(W / 2, H / 2 - 110, '你倒下了', 38, '#ff6b6b');
         this.text(W / 2, H / 2 - 50, `第 ${run.wins + 1} 场失败 · 出牌 ${run.stats.cardsPlayed} 次`, 17, COL.dim);
-        this.button(W / 2, H / 2 + 50, 200, 56, '再来一局', () => this.restart());
+        this.button(W / 2, H / 2 + 50, 200, 56, '再来一局', () => this.restart(), 0x8a2b2b);
         return;
       }
 
       if (run.wins >= CONFIG.TOTAL_WINS - 1) {
         this.text(W / 2, H / 2 - 120, '通关！', 42, COL.gold);
         this.text(W / 2, H / 2 - 56, `连赢 ${CONFIG.TOTAL_WINS} 场，牌组 ${run.deck.length} 张`, 18, COL.dim);
-        this.button(W / 2, H / 2 + 36, 200, 56, '再来一局', () => this.restart());
+        this.button(W / 2, H / 2 + 36, 200, 56, '再来一局', () => this.restart(), 0x2f7a4a);
         return;
       }
 
@@ -640,10 +672,27 @@
           onClick: () => this.chooseReward(type),
         });
       });
-      this.button(W / 2, 700, 200, 50, '跳过（不推荐）', () => this.chooseReward(null));
+      this.button(W / 2, 700, 200, 50, '跳过（不推荐）', () => this.chooseReward(null), 0x2a3550);
     }
 
-    // ── 交互 ────────────────────────────────────────────────
+    burst(x, y, color, count = 12) {
+      for (let i = 0; i < count; i++) {
+        const p = this.add.rectangle(x, y, 5, 5, color);
+        const a = Math.random() * Math.PI * 2;
+        const d = 36 + Math.random() * 70;
+        this.tweens.add({
+          targets: p,
+          x: x + Math.cos(a) * d,
+          y: y + Math.sin(a) * d,
+          alpha: 0,
+          scale: 0.2,
+          duration: 320 + Math.random() * 180,
+          ease: 'Quad.easeOut',
+          onComplete: () => p.destroy(),
+        });
+      }
+    }
+
     scheduleRender() {
       if (this.renderPending) return;
       this.renderPending = true;
@@ -675,26 +724,38 @@
       this.acting = true;
       const isAttack = card.type2 === 'attack';
       const view = this.cardViews.get(uid);
-      const target = isAttack ? { x: L.enemy.x, y: L.enemy.y } : { x: L.player.x, y: L.player.y };
+      const tx = isAttack ? L.enemy.x : L.player.x;
+      const ty = isAttack ? L.enemy.y : L.player.y;
       if (view) {
         this.tweens.add({
-          targets: view, x: target.x, y: target.y, scale: 0.28, alpha: 0.25,
-          duration: 230, ease: 'Cubic.easeIn',
+          targets: view, x: tx, y: ty, scale: 0.25, alpha: 0.2,
+          duration: 240, ease: 'Cubic.easeIn',
+          onComplete: () => { if (view.active) view.destroy(); },
         });
       }
-      if (f.enemyHp < hpBefore) this.addFloat(L.enemy.x + 90, L.enemy.y - 150, `-${hpBefore - f.enemyHp}`, '#ff6b6b');
-      if (f.block > blockBefore) this.addFloat(L.player.x - 90, L.player.y + 110, `+${f.block - blockBefore} 格挡`, '#8ab4f8');
-      if (card.ops.some((o) => o.k === 'vuln')) this.addFloat(L.enemy.x + 90, L.enemy.y - 100, '易伤 +2', '#ffb74d');
-      if (card.ops.some((o) => o.k === 'weak')) this.addFloat(L.enemy.x + 90, L.enemy.y - 100, '虚弱 +2', '#b39ddb');
-      if (card.ops.some((o) => o.k === 'str')) this.addFloat(L.player.x, L.player.y + 110, '力量 +2', '#ffd54f');
-      if (isAttack && f.enemyHp < hpBefore) {
+
+      if (f.enemyHp < hpBefore) {
+        this.addFloat(L.enemy.x + 96, L.enemy.y - 150, `-${hpBefore - f.enemyHp}`, '#ff6b6b');
+        this.burst(L.enemy.x, L.enemy.y, 0xffd54f, 14);
         this.sfx('hit');
-        this.cameras.main.shake(110, 0.006);
-        this.cameras.main.flash(90, 255, 120, 120);
+        this.cameras.main.shake(120, 0.008);
+        this.cameras.main.flash(90, 255, 90, 90);
+        if (this.enemyImg) this.tweens.add({ targets: this.enemyImg, scaleX: this.enemyImg.scaleX * 1.1, scaleY: this.enemyImg.scaleY * 0.9, duration: 60, yoyo: true });
       } else {
         this.sfx('block');
       }
-      this.time.delayedCall(250, () => {
+      if (f.block > blockBefore) {
+        this.addFloat(L.player.x - 90, L.player.y + 110, `+${f.block - blockBefore} 格挡`, '#8ab4f8');
+        this.burst(L.player.x, L.player.y, 0x8ab4f8, 10);
+      }
+      if (card.ops.some((o) => o.k === 'vuln')) this.addFloat(L.enemy.x + 96, L.enemy.y - 100, '易伤 +2', '#ffb74d');
+      if (card.ops.some((o) => o.k === 'weak')) this.addFloat(L.enemy.x + 96, L.enemy.y - 100, '虚弱 +2', '#b39ddb');
+      if (card.ops.some((o) => o.k === 'str')) {
+        this.addFloat(L.player.x, L.player.y + 110, '力量 +2', '#ffd54f');
+        this.burst(L.player.x, L.player.y, 0xffd54f, 12);
+      }
+
+      this.time.delayedCall(270, () => {
         this.acting = false;
         this.scheduleRender();
       });
@@ -706,13 +767,15 @@
       endTurn(this.run);
       if (this.run.hp < hpBefore) {
         this.addFloat(L.player.x, L.player.y + 110, `-${hpBefore - this.run.hp}`, '#ff6b6b');
-        this.sfx('hit');
-        this.cameras.main.shake(130, 0.007);
+        this.burst(L.player.x, L.player.y, 0xff6b6b, 12);
+        this.sfx('hurt');
+        this.cameras.main.shake(140, 0.009);
+        this.cameras.main.flash(110, 200, 40, 40);
       } else {
         this.sfx('block');
       }
       this.acting = true;
-      this.time.delayedCall(160, () => {
+      this.time.delayedCall(180, () => {
         this.acting = false;
         this.scheduleRender();
       });
@@ -723,24 +786,39 @@
         if (!this.ac) this.ac = new (window.AudioContext || window.webkitAudioContext)();
         if (this.ac.state === 'suspended') this.ac.resume();
         const ctx = this.ac;
-        const play = (freq, dur, type, vol, when = 0) => {
+        const play = (freq, dur, type, vol, when = 0, slideTo = null) => {
           const t0 = ctx.currentTime + when;
           const o = ctx.createOscillator();
           const g = ctx.createGain();
           o.type = type;
           o.frequency.setValueAtTime(freq, t0);
-          g.gain.setValueAtTime(vol, t0);
-          g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+          if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+          g.gain.setValueAtTime(0.0001, t0);
+          g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
           o.connect(g);
           g.connect(ctx.destination);
           o.start(t0);
-          o.stop(t0 + dur + 0.02);
+          o.stop(t0 + dur + 0.03);
         };
-        if (kind === 'hit') play(150, 0.16, 'sawtooth', 0.06);
-        else if (kind === 'block') play(460, 0.1, 'triangle', 0.05);
-        else if (kind === 'deny') play(200, 0.08, 'square', 0.03);
-        else if (kind === 'win') { [523, 659, 784].forEach((f, i) => play(f, 0.16, 'sine', 0.06, i * 0.13)); }
-        else if (kind === 'lose') { [340, 270, 200].forEach((f, i) => play(f, 0.2, 'sine', 0.06, i * 0.15)); }
+        if (kind === 'hit') {
+          play(180, 0.16, 'sawtooth', 0.07, 0, 60);
+          play(90, 0.2, 'square', 0.04, 0.01);
+        } else if (kind === 'hurt') {
+          play(120, 0.22, 'sawtooth', 0.08, 0, 50);
+        } else if (kind === 'block') {
+          play(520, 0.1, 'triangle', 0.05);
+          play(780, 0.08, 'sine', 0.03, 0.02);
+        } else if (kind === 'deny') {
+          play(190, 0.09, 'square', 0.035);
+        } else if (kind === 'turn') {
+          play(320, 0.12, 'sine', 0.04);
+          play(480, 0.14, 'sine', 0.03, 0.05);
+        } else if (kind === 'win') {
+          [523, 659, 784, 1046].forEach((f, i) => play(f, 0.18, 'triangle', 0.06, i * 0.12));
+        } else if (kind === 'lose') {
+          [330, 262, 196, 147].forEach((f, i) => play(f, 0.24, 'sawtooth', 0.05, i * 0.14));
+        }
       } catch (e) { /* 音频不可用时静默 */ }
     }
 
@@ -754,8 +832,8 @@
       this.floats.forEach((f) => {
         const age = now - f.at;
         const t = this.add.text(f.x, f.y - age * 0.045, f.text, {
-          fontFamily: FONT, fontSize: '24px', color: f.color,
-          stroke: '#05060a', strokeThickness: 4,
+          fontFamily: FONT, fontSize: '26px', color: f.color,
+          stroke: '#05060a', strokeThickness: 5,
         }).setOrigin(0.5).setDepth(8000);
         this.tweens.add({ targets: t, alpha: 0, duration: Math.max(140, 900 - age), ease: 'Quad.easeIn' });
       });
@@ -771,6 +849,7 @@
       this.rewardLocked = false;
       this.overSound = false;
       this.floats = [];
+      this.sfx('turn');
       this.scheduleRender();
     }
 
@@ -789,7 +868,8 @@
     parent: 'game',
     width: W,
     height: H,
-    backgroundColor: '#14161f',
+    backgroundColor: '#0d0f16',
+    pixelArt: true,
     scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
     scene: [BattleScene],
   });
