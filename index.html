@@ -4,11 +4,11 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="theme-color" content="#0d0f16" />
+<meta name="theme-color" content="#0b0d13" />
 <link rel="icon" href="data:," />
-<title>Card Battler</title>
+<title>残月守夜人</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0d0f16; touch-action: manipulation; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0d13; touch-action: manipulation; }
   #game { width: 100%; height: 100%; }
   #game canvas { display: block; }
 </style>
@@ -28,10 +28,11 @@
     ENERGY: 3,
     DRAW: 5,
     HAND_CAP: 10,
-    TOTAL_WINS: 3,
     VULN_MULT: 1.5,
     WEAK_MULT: 0.75,
     HEAL_BETWEEN: 12,
+    GOLD_WIN: 18,
+    GOLD_ELITE: 34,
   };
 
   const KEYWORDS = {
@@ -52,19 +53,132 @@
     fortify: { name: '坚守', cost: 1, type: 'skill', text: '获得 8 点格挡', ops: [{ k: 'block', v: 8 }], kw: ['block'] },
     rage: { name: '战意', cost: 1, type: 'power', text: '获得 2 点力量', ops: [{ k: 'str', v: 2 }], kw: ['strength'] },
     weaken: { name: '削弱', cost: 1, type: 'attack', text: '造成 6 点伤害，施加 2 层虚弱', ops: [{ k: 'damage', v: 6 }, { k: 'weak', v: 2 }], kw: ['weak'] },
+    drain: { name: '汲血', cost: 2, type: 'attack', text: '造成 9 点伤害，回复 4 点生命', ops: [{ k: 'damage', v: 9 }, { k: 'heal', v: 4 }], kw: [] },
+    curse: { name: '诅咒', cost: 2, type: 'attack', text: '造成 7 点伤害，施加 2 层易伤', ops: [{ k: 'damage', v: 7 }, { k: 'vuln', v: 2 }], kw: ['vuln'] },
   };
 
+  const REWARD_POOL = ['heavy', 'cleave', 'guard', 'fortify', 'rage', 'weaken', 'drain', 'curse'];
+
+  // 敌人：立绘 + 技能循环
   const ENEMIES = [
-    { key: 'slime', name: '黏液怪', icon: 'enemy-slime', hp: 70, atk: 10, tint: 0x4aa85e, intents: ['attack', 'weak', 'defend', 'silence', 'attack'] },
-    { key: 'wolf', name: '荒野狼', icon: 'enemy-wolf', hp: 90, atk: 12, tint: 0xb0854a, intents: ['attack', 'attack', 'weak', 'defend', 'attack'] },
-    { key: 'dragon', name: '幼龙', icon: 'enemy-dragon', hp: 110, atk: 15, tint: 0x5fae4a, intents: ['attack', 'defend', 'attack', 'silence', 'attack'] },
+    {
+      key: 'slime', name: '黏液怪', icon: 'enemy-slime', hp: 70, tint: 0x4aa85e,
+      intro: '黏液从砖缝里渗出来，汇成一个摇晃的形状。',
+      intents: [{ k: 'attack', v: 10 }, { k: 'weak', v: 2 }, { k: 'defend', v: 8 }, { k: 'silence', v: 1 }, { k: 'attack', v: 10 }],
+    },
+    {
+      key: 'wolf', name: '荒野狼', icon: 'enemy-wolf', hp: 88, tint: 0xb0854a,
+      intro: '狼在暗处低吼，眼睛像两粒炭火。',
+      intents: [{ k: 'attack', v: 12 }, { k: 'attack', v: 12 }, { k: 'weak', v: 2 }, { k: 'defend', v: 10 }, { k: 'attack', v: 12 }],
+    },
+    {
+      key: 'dragon', name: '幼龙', icon: 'enemy-dragon', hp: 118, tint: 0x5fae4a,
+      intro: '幼龙伏在金币堆上，吐出带着硫磺味的热气。它醒了。',
+      intents: [{ k: 'attack', v: 15 }, { k: 'defend', v: 14 }, { k: 'buff', v: 2 }, { k: 'silence', v: 1 }, { k: 'attack', v: 15 }],
+    },
   ];
 
-  const REWARD_POOL = ['heavy', 'cleave', 'guard', 'fortify', 'rage', 'weaken'];
+  const NODES = [
+    { type: 'battle', enemy: 0, label: '地窖入口', icon: '⚔' },
+    { type: 'event', label: '迷雾岔路', icon: '?' },
+    { type: 'battle', enemy: 1, label: '腐木林', icon: '⚔' },
+    { type: 'rest', label: '篝火', icon: '♨' },
+    { type: 'shop', label: '漂泊商人', icon: '◆' },
+    { type: 'battle', enemy: 2, label: '龙巢', icon: '☠', boss: true },
+  ];
 
-  // ─────────────────────────────────────────────────────────────
-  // 规则引擎
-  // ─────────────────────────────────────────────────────────────
+  const PROLOGUE = [
+    '残月之夜。',
+    '钟楼已经哑了三天，林子里的人一个都没回来。',
+    '守夜人循着血迹走进地窖。',
+    '……又是这种味道。',
+  ];
+
+  const ENDING_WIN = [
+    '幼龙倒下去的时候，整个巢穴安静了一瞬。',
+    '你推开最深处的石门，月光落下来。',
+    '墙上的影子动了一下。',
+    '钟声终于响了。',
+  ];
+
+  const ENDING_LOSE = [
+    '黑暗漫上来，像水一样没过膝盖。',
+    '钟声没有响起。',
+  ];
+
+  const EVENTS = [
+    {
+      id: 'altar', title: '苔痕祭坛', desc: '石台上摆着一把锈匕首，刻着看不懂的字。空气里有铁锈味。',
+      choices: [
+        { text: '献上 10 点生命，换取力量', cost: { hp: 10 }, result: '锈迹褪去。低语在你体内留下一点重量。', gain: { card: 'rage' } },
+        { text: '转身离开', result: '你退后几步，石台的光暗了下去。' },
+      ],
+    },
+    {
+      id: 'spring', title: '幽泉', desc: '一汪泉水泛着微光，水面上浮着一层薄雾。',
+      choices: [
+        { text: '喝下泉水（回复 22 生命）', result: '水很凉，伤口在发烫后安静下来。', gain: { heal: 22 } },
+        { text: '——水里好像有东西在看——离开', result: '你盯着水面看了很久，还是走开了。' },
+      ],
+    },
+    {
+      id: 'gambler', title: '骷髅赌局', desc: '一具骷髅坐在地上，面前摊着三枚骨片。它把骨片推向你。',
+      choices: [
+        { text: '赌一把', result: null, gamble: true },
+        { text: '不赌，绕开', result: '骷髅没抬头，骨片在它指节间哗啦作响。' },
+      ],
+    },
+    {
+      id: 'crate', title: '破旧货箱', desc: '半埋在苔藓里的木箱，锁已经锈断了。',
+      choices: [
+        { text: '撬开（可能得卡，也可能有陷阱）', result: null, gambleLoot: true },
+        { text: '不碰它', result: '你绕过去。箱子在身后发出轻微的响动。' },
+      ],
+    },
+    {
+      id: 'stone', title: '刻字石碑', desc: '碑面被磨得模糊，只剩一行能认：「以血换力」。',
+      choices: [
+        { text: '割开手掌（失去 12 生命，永久 +2 力量）', cost: { hp: 12 }, result: '血渗进石缝，碑下的影子好像点了一下头。', gain: { strength: 2 } },
+        { text: '离开', result: '碑上的字在你背后慢慢淡了。' },
+      ],
+    },
+    {
+      id: 'trap', title: '锈铁陷阱', desc: '脚下木板一软——你踩到了什么。',
+      choices: [
+        { text: '硬受这一下', result: '刺痛从脚踝窜上来，但你在缝隙里摸到了钱袋。', gain: { hp: -10, gold: 25 } },
+        { text: '往旁边扑倒（失去 5 生命）', result: '你滚到一边，钉子只擦破了皮。', gain: { hp: -5 } },
+      ],
+    },
+    {
+      id: 'ghost', title: '徘徊的幽灵', desc: '半透明的身影挡在路中间，指着你腰间的刀。',
+      choices: [
+        { text: '让它消解你的一张牌（移除一张打击）', result: '黑影从牌面渗过去，那张牌化成了灰。', gain: { removeCard: 'strike' } },
+        { text: '握紧刀，绕过去', result: '幽灵在你身后发出很轻的叹息。' },
+      ],
+    },
+    {
+      id: 'mender', title: '提灯的医婆', desc: '她坐在路边，药箱上落满灰。「救命的药，只收钱。」',
+      choices: [
+        { text: '付 25 金币，回复 28 生命', cost: { gold: 25 }, result: '她把药膏抹在你的伤口上，凉得发麻。', gain: { heal: 28 } },
+        { text: '没钱 / 不需要', result: '医婆吹熄了灯，人影散进雾里。' },
+      ],
+    },
+    {
+      id: 'shrine', title: '残破神龛', desc: '供台上摆着一枚干枯的果子，像是还没腐烂。',
+      choices: [
+        { text: '吃掉它（回复 10 生命，获得 1 层力量）', result: '果肉很苦，胃里却烧起一小团火。', gain: { heal: 10, strength: 1 } },
+        { text: '放回去', result: '你把它摆正，神龛里好像有人笑了一声。' },
+      ],
+    },
+    {
+      id: 'forge', title: '荒废旧炉', desc: '炉膛里还有温度，铁砧上放着一把没开刃的短刀。',
+      choices: [
+        { text: '拿走它（获得一张随机攻击牌）', result: '刀比看上去沉，你把它别在腰后。', gain: { randomCard: 'attack' } },
+        { text: '往炉里添柴，暖一会（回复 12 生命）', result: '火光映在墙上，你的影子终于不再发抖。', gain: { heal: 12 } },
+      ],
+    },
+  ];
+
   let UID = 1;
 
   function mulberry32(a) {
@@ -94,10 +208,18 @@
     const run = {
       seed, rng,
       hp: CONFIG.MAX_HP, maxHp: CONFIG.MAX_HP,
-      strength: 0, wins: 0,
+      gold: 10, strength: 0,
       deck: [],
-      stats: { turns: 0, dmgDealt: 0, dmgTaken: 0, blockGained: 0, cardsPlayed: 0 },
-      fight: null,
+      phase: 'title',
+      nodes: NODES.map((n) => ({ ...n, done: false })),
+      nodeIdx: 0,
+      battle: null,
+      dialog: null,
+      event: null,
+      shop: null,
+      reward: null,
+      resultText: '',
+      stats: { turns: 0, dmgDealt: 0, dmgTaken: 0, cardsPlayed: 0, battles: 0 },
       log: '',
     };
     for (let i = 0; i < 5; i++) run.deck.push(makeCard('strike'));
@@ -106,183 +228,325 @@
     return run;
   }
 
-  function enemyOf(tier) {
-    return ENEMIES[Math.min(tier, ENEMIES.length - 1)];
+  function enemyOf(idx) {
+    return ENEMIES[Math.min(idx, ENEMIES.length - 1)];
   }
 
-  function getIntent(f) {
-    const e = enemyOf(f.tier);
-    const kind = e.intents[f.intentIdx % e.intents.length];
-    if (kind === 'attack') return { k: 'attack', v: e.atk };
-    if (kind === 'defend') return { k: 'defend', v: 8 + f.tier * 2 };
-    if (kind === 'weak') return { k: 'weak', v: 2 };
-    return { k: 'silence', v: 1 };
+  function currentNode(run) {
+    return run.nodes[run.nodeIdx] || null;
   }
 
-  function startFight(run, tier) {
-    run.hp = Math.min(run.maxHp, run.hp + (tier > 0 ? CONFIG.HEAL_BETWEEN : 0));
-    const e = enemyOf(tier);
-    run.fight = {
-      tier,
+  // ── 战斗 ───────────────────────────────────────────────────
+  function startBattle(run, enemyIdx) {
+    const e = enemyOf(enemyIdx);
+    run.battle = {
+      enemyIdx,
       enemyHp: e.hp, enemyMax: e.hp,
-      enemyVuln: 0, enemyBlock: 0, enemyWeak: 0,
+      enemyVuln: 0, enemyBlock: 0, enemyWeak: 0, enemyStr: 0,
       playerWeak: 0, playerSilence: 0,
       intentIdx: 0, turn: 0, block: 0, energy: 0,
       draw: shuffle(run.deck.slice(), run.rng),
       hand: [], discard: [], limbo: null,
       over: false, result: null,
     };
+    run.stats.battles++;
     beginTurn(run);
+    run.phase = 'battle';
+  }
+
+  function battleIntent(b) {
+    const e = enemyOf(b.enemyIdx);
+    const it = e.intents[b.intentIdx % e.intents.length];
+    if (it.k === 'attack') return { k: 'attack', v: it.v + b.enemyStr };
+    return { ...it };
   }
 
   function beginTurn(run) {
-    const f = run.fight;
-    f.turn++;
-    f.block = 0;
-    f.energy = CONFIG.ENERGY;
-    if (f.enemyVuln > 0) f.enemyVuln--;
-    if (f.playerWeak > 0) f.playerWeak--;
+    const b = run.battle;
+    b.turn++;
+    b.block = 0;
+    b.energy = CONFIG.ENERGY;
+    if (b.enemyVuln > 0) b.enemyVuln--;
+    if (b.playerWeak > 0) b.playerWeak--;
     drawCards(run, CONFIG.DRAW);
     run.stats.turns++;
   }
 
   function drawCards(run, n) {
-    const f = run.fight;
+    const b = run.battle;
     for (let i = 0; i < n; i++) {
-      if (!f.draw.length) {
-        if (!f.discard.length) return;
-        f.draw = shuffle(f.discard.slice(), run.rng);
-        f.discard = [];
+      if (!b.draw.length) {
+        if (!b.discard.length) return;
+        b.draw = shuffle(b.discard.slice(), run.rng);
+        b.discard = [];
       }
-      const c = f.draw.pop();
-      if (f.hand.length < CONFIG.HAND_CAP) f.hand.push(c);
-      else f.discard.push(c);
+      const c = b.draw.pop();
+      if (b.hand.length < CONFIG.HAND_CAP) b.hand.push(c);
+      else b.discard.push(c);
     }
   }
 
   function attackDamage(run, base) {
-    const f = run.fight;
+    const b = run.battle;
     let dmg = base + run.strength;
-    if (f.playerWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
+    if (b.playerWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
     return dmg;
   }
 
   function applyOp(run, op) {
-    const f = run.fight;
+    const b = run.battle;
     if (op.k === 'damage') {
       let dmg = attackDamage(run, op.v);
-      if (f.enemyVuln > 0) dmg = Math.floor(dmg * CONFIG.VULN_MULT);
-      const absorbed = Math.min(f.enemyBlock, dmg);
-      f.enemyBlock -= absorbed;
+      if (b.enemyVuln > 0) dmg = Math.floor(dmg * CONFIG.VULN_MULT);
+      const absorbed = Math.min(b.enemyBlock, dmg);
+      b.enemyBlock -= absorbed;
       dmg -= absorbed;
-      f.enemyHp = Math.max(0, f.enemyHp - dmg);
+      b.enemyHp = Math.max(0, b.enemyHp - dmg);
       run.stats.dmgDealt += dmg;
       const parts = [];
-      if (f.enemyVuln > 0) parts.push('易伤');
-      if (f.playerWeak > 0) parts.push('虚弱');
-      const blocked = absorbed > 0 ? `，敌人格挡吃掉 ${absorbed}` : '';
+      if (b.enemyVuln > 0) parts.push('易伤');
+      if (b.playerWeak > 0) parts.push('虚弱');
+      const blocked = absorbed > 0 ? `，格挡吃掉 ${absorbed}` : '';
       run.log = `造成 ${dmg} 点伤害${parts.length ? '（' + parts.join('·') + '）' : ''}${blocked}`;
     } else if (op.k === 'block') {
-      f.block += op.v;
-      run.stats.blockGained += op.v;
+      b.block += op.v;
       run.log = `获得 ${op.v} 点格挡`;
     } else if (op.k === 'vuln') {
-      f.enemyVuln += op.v;
+      b.enemyVuln += op.v;
       run.log = `敌人获得 ${op.v} 层易伤`;
     } else if (op.k === 'weak') {
-      f.enemyWeak += op.v;
+      b.enemyWeak += op.v;
       run.log = `敌人获得 ${op.v} 层虚弱`;
     } else if (op.k === 'str') {
       run.strength += op.v;
       run.log = `你获得 ${op.v} 点力量`;
+    } else if (op.k === 'heal') {
+      run.hp = Math.min(run.maxHp, run.hp + op.v);
+      run.log = `回复 ${op.v} 点生命`;
     }
   }
 
   function canPlay(run, card) {
-    const f = run.fight;
-    if (f.over) return { ok: false, why: 'over' };
+    const b = run.battle;
+    if (!b || b.over) return { ok: false, why: 'over' };
     if (!card) return { ok: false, why: 'gone' };
-    if (card.type2 === 'attack' && f.playerSilence > 0) return { ok: false, why: 'silence' };
-    if (f.energy < card.cost) return { ok: false, why: 'energy' };
+    if (card.type2 === 'attack' && b.playerSilence > 0) return { ok: false, why: 'silence' };
+    if (b.energy < card.cost) return { ok: false, why: 'energy' };
     return { ok: true };
   }
 
   function playCard(run, uid) {
-    const f = run.fight;
-    const c = f.hand.find((x) => x.uid === uid);
+    const b = run.battle;
+    const c = b.hand.find((x) => x.uid === uid);
     const check = canPlay(run, c);
     if (!check.ok) return check;
-
-    f.energy -= c.cost;
-    f.hand = f.hand.filter((x) => x.uid !== uid);
-    f.limbo = c;
+    b.energy -= c.cost;
+    b.hand = b.hand.filter((x) => x.uid !== uid);
+    b.limbo = c;
     for (const op of c.ops) applyOp(run, op);
-    f.limbo = null;
-    f.discard.push(c);
+    b.limbo = null;
+    b.discard.push(c);
     run.stats.cardsPlayed++;
-
-    if (f.enemyHp <= 0) { f.over = true; f.result = 'win'; }
+    if (b.enemyHp <= 0) { b.over = true; b.result = 'win'; }
     return { ok: true };
   }
 
   function enemyAct(run) {
-    const f = run.fight;
-    const intent = getIntent(f);
-    f.enemyBlock = 0;
-
+    const b = run.battle;
+    const intent = battleIntent(b);
+    b.enemyBlock = 0;
     if (intent.k === 'defend') {
-      f.enemyBlock = intent.v;
+      b.enemyBlock = intent.v;
       run.log = `敌人获得 ${intent.v} 点格挡`;
     } else if (intent.k === 'attack') {
       let dmg = intent.v;
-      if (f.enemyWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
-      const absorbed = Math.min(f.block, dmg);
-      f.block -= absorbed;
+      if (b.enemyWeak > 0) dmg = Math.floor(dmg * CONFIG.WEAK_MULT);
+      const absorbed = Math.min(b.block, dmg);
+      b.block -= absorbed;
       dmg -= absorbed;
-      const tag = f.enemyWeak > 0 ? '（虚弱）' : '';
       if (dmg > 0) {
         run.hp -= dmg;
         run.stats.dmgTaken += dmg;
-        run.log = `敌人攻击 ${intent.v} 点${tag}，你受到 ${dmg} 点${absorbed > 0 ? `（格挡抵消 ${absorbed}）` : ''}`;
+        run.log = `敌人攻击 ${intent.v} 点，你受到 ${dmg} 点${absorbed > 0 ? `（格挡抵消 ${absorbed}）` : ''}`;
       } else {
-        run.log = `敌人攻击 ${intent.v} 点${tag}，被格挡完全抵消`;
+        run.log = `敌人攻击 ${intent.v} 点，被格挡完全抵消`;
       }
     } else if (intent.k === 'weak') {
-      f.playerWeak += intent.v;
+      b.playerWeak += intent.v;
       run.log = `你获得 ${intent.v} 层虚弱`;
     } else if (intent.k === 'silence') {
-      f.playerSilence = 1;
+      b.playerSilence = 1;
       run.log = '你被沉默：本回合不能打出攻击牌';
+    } else if (intent.k === 'buff') {
+      b.enemyStr += intent.v;
+      run.log = `敌人气势暴涨（攻击 +${intent.v}）`;
     }
-
-    f.intentIdx++;
-    if (f.enemyWeak > 0) f.enemyWeak--;
-    if (run.hp <= 0) { run.hp = 0; f.over = true; f.result = 'lose'; }
+    b.intentIdx++;
+    if (b.enemyWeak > 0) b.enemyWeak--;
+    if (run.hp <= 0) { run.hp = 0; b.over = true; b.result = 'lose'; }
   }
 
   function endTurn(run) {
-    const f = run.fight;
-    if (f.over) return;
-    f.playerSilence = 0;
-    f.discard.push(...f.hand);
-    f.hand = [];
+    const b = run.battle;
+    if (b.over) return;
+    b.playerSilence = 0;
+    b.discard.push(...b.hand);
+    b.hand = [];
     enemyAct(run);
-    if (!f.over) beginTurn(run);
+    if (!b.over) beginTurn(run);
   }
 
-  function offerRewards(run) {
-    return shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3);
+  // ── 节点流转 ───────────────────────────────────────────────
+  function advanceNode(run) {
+    const cur = currentNode(run);
+    if (cur) cur.done = true;
+    run.nodeIdx++;
+    run.log = '';
+    if (run.nodeIdx >= run.nodes.length) {
+      run.phase = 'ending';
+      run.resultText = 'win';
+      return;
+    }
+    run.phase = 'map';
+  }
+
+  function enterNode(run) {
+    const node = currentNode(run);
+    if (!node) return;
+    if (node.type === 'battle') {
+      const e = enemyOf(node.enemy);
+      run.dialog = { lines: [e.intro], idx: 0, after: () => { startBattle(run, node.enemy); } };
+      run.phase = 'dialog';
+    } else if (node.type === 'event') {
+      const pool = EVENTS.filter((ev) => ev.id !== run.lastEvent);
+      const ev = pool[Math.floor(run.rng() * pool.length)];
+      run.lastEvent = ev.id;
+      run.event = { def: ev, resolved: false, resultText: '' };
+      run.phase = 'event';
+    } else if (node.type === 'rest') {
+      run.phase = 'rest';
+    } else if (node.type === 'shop') {
+      const pool = shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3);
+      run.shop = {
+        cards: pool.map((t, i) => ({ type: t, price: 40 + i * 10, bought: false })),
+        healBought: false,
+      };
+      run.phase = 'shop';
+    }
+  }
+
+  function finishBattle(run) {
+    const b = run.battle;
+    if (b.result === 'lose') {
+      run.phase = 'ending';
+      run.resultText = 'lose';
+      return;
+    }
+    const node = currentNode(run);
+    const gold = node && node.boss ? CONFIG.GOLD_ELITE : CONFIG.GOLD_WIN;
+    run.gold += gold;
+    run.battle = null;
+    run.reward = {
+      gold,
+      cards: shuffle(REWARD_POOL.slice(), run.rng).slice(0, 3),
+      picked: false,
+    };
+    run.phase = 'reward';
   }
 
   function pickReward(run, type) {
-    run.deck.push(makeCard(type));
-    run.wins++;
-    run.log = `「${CARD_DEFS[type].name}」加入牌组`;
+    if (run.reward.picked) return;
+    run.reward.picked = true;
+    if (type) run.deck.push(makeCard(type));
+    advanceNode(run);
   }
 
-  window.__cardProto = {
-    CONFIG, KEYWORDS, CARD_DEFS, ENEMIES,
-    newRun, startFight, playCard, endTurn, beginTurn, getIntent, offerRewards, pickReward, canPlay,
+  function applyEventChoice(run, idx) {
+    const ev = run.event;
+    if (ev.resolved) return;
+    const choice = ev.def.choices[idx];
+    if (choice.cost) {
+      if (choice.cost.hp && run.hp <= choice.cost.hp) { run.log = '生命不够，做不了。'; return; }
+      if (choice.cost.gold && run.gold < choice.cost.gold) { run.log = '金币不够。'; return; }
+      if (choice.cost.hp) run.hp -= choice.cost.hp;
+      if (choice.cost.gold) run.gold -= choice.cost.gold;
+    }
+    let text = choice.result || '';
+    if (choice.gamble) {
+      if (run.rng() < 0.5) { run.gold += 30; text = '骨片翻面：你赢了。骷髅把一袋金币推过来。'; }
+      else { run.hp = Math.max(1, run.hp - 8); text = '骨片翻面：你输了。它笑着收走了你的一点血。'; }
+    }
+    if (choice.gambleLoot) {
+      if (run.rng() < 0.6) {
+        const t = REWARD_POOL[Math.floor(run.rng() * REWARD_POOL.length)];
+        run.deck.push(makeCard(t));
+        text = `箱子里是「${CARD_DEFS[t].name}」。`;
+      } else {
+        run.hp = Math.max(1, run.hp - 9);
+        text = '箱底是碎的玻璃碴。你割破了手。';
+      }
+    }
+    if (choice.gain) {
+      const g = choice.gain;
+      if (g.heal) run.hp = Math.min(run.maxHp, run.hp + g.heal);
+      if (g.hp) run.hp = Math.max(1, run.hp + g.hp);
+      if (g.gold) run.gold += g.gold;
+      if (g.strength) run.strength += g.strength;
+      if (g.card) run.deck.push(makeCard(g.card));
+      if (g.randomCard) {
+        const pool = REWARD_POOL.filter((t) => CARD_DEFS[t].type === 'attack');
+        run.deck.push(makeCard(pool[Math.floor(run.rng() * pool.length)]));
+      }
+      if (g.removeCard) {
+        const i = run.deck.findIndex((c) => c.type === g.removeCard);
+        if (i >= 0) run.deck.splice(i, 1);
+      }
+    }
+    ev.resolved = true;
+    ev.resultText = text;
+  }
+
+  function leaveEvent(run) {
+    advanceNode(run);
+  }
+
+  function buyCard(run, idx) {
+    const item = run.shop.cards[idx];
+    if (!item || item.bought || run.gold < item.price) return;
+    run.gold -= item.price;
+    item.bought = true;
+    run.deck.push(makeCard(item.type));
+    run.log = `买下「${CARD_DEFS[item.type].name}」。`;
+  }
+
+  function buyHeal(run) {
+    if (run.shop.healBought || run.gold < 30) return;
+    run.gold -= 30;
+    run.shop.healBought = true;
+    run.hp = Math.min(run.maxHp, run.hp + 25);
+    run.log = '喝下一碗热汤，伤口不再疼了。';
+  }
+
+  function leaveShop(run) {
+    advanceNode(run);
+  }
+
+  function restHeal(run) {
+    run.hp = Math.min(run.maxHp, run.hp + Math.floor(run.maxHp * 0.3));
+    advanceNode(run);
+  }
+
+  function restRemove(run) {
+    const i = run.deck.findIndex((c) => c.type === 'strike');
+    if (i >= 0) run.deck.splice(i, 1);
+    advanceNode(run);
+  }
+
+  window.__game = {
+    CONFIG, KEYWORDS, CARD_DEFS, ENEMIES, EVENTS, NODES,
+    newRun, enterNode, startBattle, playCard, endTurn, canPlay, battleIntent,
+    finishBattle, pickReward, applyEventChoice, leaveEvent,
+    buyCard, buyHeal, leaveShop, restHeal, restRemove, advanceNode,
   };
 
   // ─────────────────────────────────────────────────────────────
@@ -290,7 +554,7 @@
   // ─────────────────────────────────────────────────────────────
   const FONT = "'PingFang SC','Microsoft YaHei',sans-serif";
   const COL = {
-    bg: 0x0d0f16,
+    bg: 0x0b0d13,
     text: '#e8eaf2',
     dim: '#8b90a6',
     gold: '#f2c14e',
@@ -299,15 +563,6 @@
     attack: 0x9e3b32,
     skill: 0x2a5f86,
     power: 0x6040b0,
-  };
-
-  const L = {
-    enemy: { x: W / 2, y: 330, r: 96 },
-    player: { x: W / 2, y: 830, r: 70 },
-    hand: { y: 1160, cw: 112, ch: 152, gap: 8 },
-    endBtn: { x: W - 120, y: 690, w: 176, h: 56 },
-    log: { y: 620 },
-    deckInfo: { y: 1250 },
   };
 
   const ASSETS = {
@@ -320,8 +575,15 @@
     'hero': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAABVUlEQVR4nGNgQAGs/xlwApAcDONVgF3u0wxjMH67zAmbOtb/u84+xmEA6/+9GmpgvF5O8/+3NE2wQWhqWf+3Td+GxQDW/3rmAWAsKCgDlgcZ8ilc4f+3Zjtk9dgMYP2//cC5/+fuvvq/YMPO/8EZrf+lxFThhoAwHgNY/xe1L0TBqjoOcAOwhBemAW7+CWBbQezQ+HIwjTAAS0BhMyC+sA0sBjMIhK0cE7DHArYwAAUcDIM0di8/Co4tmMEoBnipasFtgYU4LAZAbFAYpObXgWkQRglAUOL4czH2/8Niw/9WUiJgSZAtINtALnOOzIcbysYiBMYoBoD9JiXyX1bZCO4KELu0czo4LGA2gmIDpxdgIQyjQbb4qEn/TzKV/y8lKA73Bkgzihdgzqlw1kCJY1CggVwBcjooHJBdhzMqkaMR5BKYv0E0yPmwAMWiGZtBqAbish0AZ2ggcVHDIi0AAAAASUVORK5CYII=',
   };
 
-  class BattleScene extends Phaser.Scene {
-    constructor() { super('battle'); }
+  const L = {
+    enemy: { x: W / 2, y: 330, r: 96 },
+    player: { x: W / 2, y: 830, r: 70 },
+    hand: { y: 1160, cw: 112, ch: 152, gap: 8 },
+    endBtn: { x: W - 120, y: 690, w: 176, h: 56 },
+  };
+
+  class GameScene extends Phaser.Scene {
+    constructor() { super('game'); }
 
     preload() {
       Object.entries(ASSETS).forEach(([k, v]) => this.load.image(k, v));
@@ -329,20 +591,20 @@
 
     create() {
       this.run = newRun(20261119);
-      startFight(this.run, 0);
-      this.showGlossary = false;
       this.tip = null;
-      this.renderPending = false;
-      this.rewardLocked = false;
       this.acting = false;
       this.floats = [];
       this.cardViews = new Map();
-      this.overSound = false;
+      this.renderPending = false;
       this.ac = null;
+      this.bgmTimer = null;
+      this.muted = false;
+      this.lastTurnKey = '';
       this.render();
       Object.assign(window, { game: this.game });
     }
 
+    // ── 绘制工具 ────────────────────────────────────────────
     text(x, y, str, size = 17, color = COL.text, align = 'center') {
       return this.add.text(x, y, str, { fontFamily: FONT, fontSize: `${size}px`, color, align }).setOrigin(0.5);
     }
@@ -352,38 +614,30 @@
       g.fillStyle(0x1c2030, 1);
       g.fillRoundedRect(x, y, w, h, h / 2);
       const rw = Math.max(0, Math.min(1, ratio)) * w;
-      if (rw > 0) {
-        g.fillStyle(color, 1);
-        g.fillRoundedRect(x, y, rw, h, h / 2);
-      }
+      if (rw > 0) { g.fillStyle(color, 1); g.fillRoundedRect(x, y, rw, h, h / 2); }
       return g;
     }
 
-    button(x, y, w, h, label, onClick, tone = 0x3b5bdb) {
+    button(x, y, w, h, label, onClick, tone = 0x3b5bdb, disabled = false) {
       const g = this.add.graphics();
-      g.fillStyle(tone, 1);
-      g.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
-      g.lineStyle(2, 0xffffff, 0.16);
-      g.strokeRoundedRect(-w / 2, -h / 2, w, h, 10);
+      const draw = (c) => { g.clear(); g.fillStyle(c, disabled ? 0.4 : 1); g.fillRoundedRect(-w / 2, -h / 2, w, h, 10); g.lineStyle(2, 0xffffff, 0.16); g.strokeRoundedRect(-w / 2, -h / 2, w, h, 10); };
+      draw(tone);
       const t = this.text(0, 0, label, 18, '#ffffff');
       const c = this.add.container(x, y, [g, t]);
       c.setSize(w, h);
+      if (disabled) return c;
       c.setInteractive(new Phaser.Geom.Rectangle(-w / 2, -h / 2, w, h), Phaser.Geom.Rectangle.Contains);
-      c.on('pointerover', () => g.clear().fillStyle(Phaser.Display.Color.ValueToColor(tone).brighten(14).color, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
-      c.on('pointerout', () => g.clear().fillStyle(tone, 1).fillRoundedRect(-w / 2, -h / 2, w, h, 10));
+      c.on('pointerover', () => draw(Phaser.Display.Color.ValueToColor(tone).brighten(14).color));
+      c.on('pointerout', () => draw(tone));
       c.on('pointerdown', onClick);
       return c;
     }
 
-    hideTip() {
-      if (this.tip) { this.tip.destroy(true); this.tip = null; }
-    }
+    hideTip() { if (this.tip) { this.tip.destroy(true); this.tip = null; } }
 
     showTip(cx, cy, lines) {
       this.hideTip();
-      const w = 330;
-      const pad = 12;
-      const lh = 21;
+      const w = 330, pad = 12, lh = 21;
       const h = pad * 2 + lines.length * lh;
       let ty = cy;
       if (ty - h / 2 < 8) ty = h / 2 + 8;
@@ -402,11 +656,6 @@
       this.tip = this.add.container(cx, ty, kids).setDepth(9999);
     }
 
-    tipForKeyword(key) {
-      const k = KEYWORDS[key];
-      return { text: `${k.name}：${k.desc}`, color: k.color };
-    }
-
     badge(x, y, key, stacks, prefix = '') {
       const k = KEYWORDS[key];
       const g = this.add.graphics();
@@ -416,17 +665,14 @@
       g.strokeCircle(0, 0, 19);
       g.lineStyle(2, Phaser.Display.Color.HexStringToColor(k.color).color, 1);
       g.strokeCircle(0, 0, 19);
-      const label = k.short + (stacks > 1 ? stacks : '');
-      const t = this.text(0, 0, label, 17, k.color);
+      const t = this.text(0, 0, k.short + (stacks > 1 ? stacks : ''), 17, k.color);
       const c = this.add.container(x, y, [g, t]);
       c.setSize(38, 38);
       c.setInteractive(new Phaser.Geom.Rectangle(-19, -19, 38, 38), Phaser.Geom.Rectangle.Contains);
-      const show = () => {
-        this.showTip(x, y - 56, [
-          { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
-          { text: k.desc, color: '#c9cde0' },
-        ]);
-      };
+      const show = () => this.showTip(x, y - 56, [
+        { text: `${prefix}${k.name}${stacks > 1 ? ' ×' + stacks : ''}`, color: k.color, size: 15 },
+        { text: k.desc, color: '#c9cde0' },
+      ]);
       c.on('pointerover', show);
       c.on('pointerdown', show);
       c.on('pointerout', () => this.hideTip());
@@ -447,27 +693,22 @@
       g.lineStyle(2, opts.disabled ? 0x8a6b2a : 0xffffff, opts.disabled ? 1 : 0.28);
       g.strokeRoundedRect(-cw / 2, -ch / 2, cw, ch, 10);
       cont.add(g);
-
       const iconKey = card.type2 === 'attack' ? 'icon-attack' : card.type2 === 'power' ? 'icon-power' : 'icon-skill';
       const icon = this.add.image(-cw / 2 + 22, -ch / 2 + 24, iconKey).setDisplaySize(26, 26);
       icon.setAlpha(opts.disabled ? 0.5 : 1);
       cont.add(icon);
       cont.add(this.text(cw / 2 - 16, -ch / 2 + 20, String(card.cost), 18, COL.gold));
       cont.add(this.text(0, -ch / 2 + 54, card.name, opts.big ? 20 : 16, '#ffffff'));
-
       const body = this.add.text(0, 10, card.text, {
         fontFamily: FONT, fontSize: `${opts.big ? 14 : 12}px`, color: '#fff4e6',
         align: 'center', wordWrap: { width: cw - 18 },
       }).setOrigin(0.5);
       cont.add(body);
-
       const tag = card.type2 === 'attack' ? '攻击' : card.type2 === 'power' ? '能力' : '技能';
       cont.add(this.text(0, ch / 2 - 16, tag, 11, '#ffffff'));
       if (opts.disabled) cont.add(this.text(0, ch / 2 - 38, '不可用', 11, '#ffcf70'));
-
       cont.setSize(cw, ch);
       cont.setInteractive(new Phaser.Geom.Rectangle(-cw / 2 - 6, -ch / 2 - 20, cw + 12, ch + 40), Phaser.Geom.Rectangle.Contains);
-
       if (opts.onClick) {
         cont.on('pointerover', () => {
           this.tweens.add({ targets: cont, scale: 1.06, y: baseY - 10, duration: 90 });
@@ -475,8 +716,7 @@
             { text: `${card.name}  ·  ${card.cost} 费  ·  ${tag}`, color: '#ffffff', size: 15 },
             { text: card.text, color: '#c9cde0' },
           ];
-          (card.kw || []).forEach((key) => lines.push(this.tipForKeyword(key)));
-          if (card.type2 === 'attack') lines.push({ text: '攻击牌：受「沉默」影响', color: '#8b90a6' });
+          (card.kw || []).forEach((key) => lines.push({ text: `${KEYWORDS[key].name}：${KEYWORDS[key].desc}`, color: KEYWORDS[key].color }));
           this.showTip(x, baseY - 170, lines);
         });
         cont.on('pointerout', () => {
@@ -488,211 +728,354 @@
       return cont;
     }
 
-    drawBackground() {
+    // ── 背景 ────────────────────────────────────────────────
+    drawDungeon() {
       const g = this.add.graphics();
       g.fillStyle(COL.bg, 1);
       g.fillRect(0, 0, W, H);
-      g.lineStyle(1, 0x171c29, 1);
-      for (let x = 0; x <= W; x += 72) g.lineBetween(x, 0, x, H);
-      for (let y = 0; y <= H; y += 72) g.lineBetween(0, y, W, y);
-      g.fillStyle(0x161d33, 0.6);
-      g.fillCircle(L.enemy.x, L.enemy.y + 40, 195);
-      g.fillStyle(0x11261f, 0.5);
-      g.fillCircle(L.player.x, L.player.y + 40, 170);
+      const bw = 96, bh = 46;
+      for (let row = 0; row < H / bh + 1; row++) {
+        const off = row % 2 ? bw / 2 : 0;
+        for (let col = -1; col < W / bw + 1; col++) {
+          const x = col * bw + off, y = row * bh;
+          g.fillStyle(0x10131c, 1);
+          g.fillRect(x + 2, y + 2, bw - 4, bh - 4);
+          g.lineStyle(1, 0x191e2b, 1);
+          g.strokeRect(x + 2, y + 2, bw - 4, bh - 4);
+        }
+      }
+      g.fillStyle(0x3a2410, 0.22);
+      g.fillCircle(40, 320, 210);
+      g.fillCircle(W - 40, 320, 210);
       return g;
     }
 
-    drawEnemy(f) {
-      const e = enemyOf(f.tier);
-      const { x: cx, y: cy, r } = L.enemy;
+    // ── 主渲染分派 ──────────────────────────────────────────
+    render() {
+      this.tweens.killAll();
+      this.hideTip();
+      this.input.removeAllListeners('pointerdown');
+      this.children.removeAll(true);
+      this.cardViews = new Map();
 
+      const run = this.run;
+      this.drawDungeon();
+
+      if (run.phase === 'title') this.renderTitle(run);
+      else if (run.phase === 'dialog') this.renderDialog(run);
+      else if (run.phase === 'map') this.renderMap(run);
+      else if (run.phase === 'battle') this.renderBattle(run);
+      else if (run.phase === 'reward') this.renderReward(run);
+      else if (run.phase === 'event') this.renderEvent(run);
+      else if (run.phase === 'shop') this.renderShop(run);
+      else if (run.phase === 'rest') this.renderRest(run);
+      else if (run.phase === 'ending') this.renderEnding(run);
+
+      this.renderFloats();
+    }
+
+    // ── 标题 ────────────────────────────────────────────────
+    renderTitle(run) {
+      this.text(W / 2, 380, '残月守夜人', 54, COL.gold);
+      this.text(W / 2, 448, '一个关于钟声没有响起的夜晚', 17, COL.dim);
+      this.add.rectangle(W / 2, 640, 520, 2, 0x2a3147);
+      this.text(W / 2, 700, '卡牌 · Roguelike · 单机', 15, COL.dim);
+      this.button(W / 2, 840, 260, 64, '开始守夜', () => this.beginRun(), 0x2f6a4a);
+      this.text(W / 2, 1210, '素材：Pixel Art Atlas（CC0）· 自绘界面 · 无外部依赖', 12, '#4a5066');
+    }
+
+    beginRun() {
+      const run = this.run;
+      run.dialog = { lines: PROLOGUE.slice(), idx: 0, after: () => { run.phase = 'map'; } };
+      run.phase = 'dialog';
+      this.startBgm();
+      this.scheduleRender();
+    }
+
+    // ── 对话 ────────────────────────────────────────────────
+    renderDialog(run) {
+      const d = run.dialog;
+      const line = d.lines[d.idx];
+      this.add.rectangle(W / 2, 980, W - 60, 260, 0x080a10, 0.92).setStrokeStyle(2, 0x2a3147);
+      this.text(W / 2, 900, `—— ${d.idx + 1} / ${d.lines.length} ——`, 13, COL.dim);
+      const t = this.add.text(70, 940, line, {
+        fontFamily: FONT, fontSize: '22px', color: '#e8eaf2',
+        wordWrap: { width: W - 140 }, lineSpacing: 10,
+      }).setOrigin(0, 0);
+      this.text(W / 2, 1130, '点击继续 ▸', 14, COL.dim);
+      this.input.once('pointerdown', () => {
+        this.sfx('tap');
+        if (d.idx + 1 < d.lines.length) { d.idx++; this.render(); }
+        else { const after = d.after; run.dialog = null; after(); this.render(); }
+      });
+    }
+
+    // ── 地图 ────────────────────────────────────────────────
+    renderMap(run) {
+      this.text(W / 2, 120, '残月森林', 34, COL.gold);
+      this.text(W / 2, 168, `第 ${run.nodeIdx + 1} / ${run.nodes.length} 段路`, 15, COL.dim);
+
+      const startY = 280;
+      const gapY = 150;
+      run.nodes.forEach((n, i) => {
+        const y = startY + i * gapY;
+        const isCurrent = i === run.nodeIdx;
+        const isDone = n.done;
+        const color = isDone ? 0x2a2f3d : isCurrent ? 0x3b5bdb : 0x1a1f2c;
+        const g = this.add.graphics();
+        g.fillStyle(color, isCurrent ? 1 : 0.85);
+        g.fillRoundedRect(60, y - 44, W - 120, 88, 14);
+        g.lineStyle(2, isCurrent ? 0x8ab4f8 : 0x232a3a, 1);
+        g.strokeRoundedRect(60, y - 44, W - 120, 88, 14);
+        this.text(120, y, n.icon, 30, isCurrent ? '#ffffff' : '#5b6075');
+        this.text(180, y - 12, n.label, 21, isDone ? '#4a5066' : isCurrent ? '#ffffff' : '#6b7088').setOrigin(0, 0.5);
+        const sub = n.type === 'battle' ? (n.boss ? '首领' : '战斗') : n.type === 'event' ? '奇遇' : n.type === 'rest' ? '休整' : '商店';
+        this.text(180, y + 18, sub, 13, isDone ? '#3a4055' : '#8b90a6').setOrigin(0, 0.5);
+
+        if (isCurrent) {
+          const hit = this.add.zone(W / 2, y, W - 120, 96).setOrigin(0.5).setInteractive();
+          hit.on('pointerdown', () => { this.sfx('tap'); enterNode(run); this.scheduleRender(); });
+        }
+      });
+
+      // 顶部状态
+      this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
+      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
+      if (run.strength) this.text(W / 2, 60, `力量 +${run.strength}`, 15, '#ffd54f');
+    }
+
+    // ── 战斗 ────────────────────────────────────────────────
+    renderBattle(run) {
+      const b = run.battle;
+      const e = enemyOf(b.enemyIdx);
+
+      this.text(W / 2, 42, e.name, 22, COL.text);
+      this.text(20, 84, `回合 ${b.turn}`, 15, COL.dim).setOrigin(0, 0.5);
+      this.text(W - 20, 84, `金币 ${run.gold}`, 13, COL.gold).setOrigin(1, 0.5);
+
+      // 敌人
       const halo = this.add.graphics();
       halo.fillStyle(e.tint, 0.1);
-      halo.fillCircle(cx, cy, r + 20);
+      halo.fillCircle(L.enemy.x, L.enemy.y, L.enemy.r + 20);
       halo.fillStyle(e.tint, 0.16);
-      halo.fillCircle(cx, cy, r + 8);
-
-      const img = this.add.image(cx, cy, e.icon).setDisplaySize(r * 2.1, r * 2.1);
+      halo.fillCircle(L.enemy.x, L.enemy.y, L.enemy.r + 8);
+      const img = this.add.image(L.enemy.x, L.enemy.y, e.icon).setDisplaySize(L.enemy.r * 2.1, L.enemy.r * 2.1);
       this.enemyImg = img;
 
-      this.text(cx, cy - r - 52, `${e.name} · HP ${f.enemyHp}/${f.enemyMax}`, 19, COL.text);
-      this.bar(cx - 130, cy + r + 26, 260, 18, f.enemyHp / f.enemyMax, COL.red);
+      this.text(L.enemy.x, L.enemy.y - L.enemy.r - 52, `HP ${b.enemyHp}/${b.enemyMax}`, 19, COL.text);
+      this.bar(L.enemy.x - 130, L.enemy.y + L.enemy.r + 26, 260, 18, b.enemyHp / b.enemyMax, COL.red);
 
-      const intent = getIntent(f);
-      const intentMap = {
+      const intent = battleIntent(b);
+      const map = {
         attack: `意图：攻击 ${intent.v}`,
         defend: `意图：防御 ${intent.v}`,
         weak: `意图：施加 ${intent.v} 层虚弱`,
         silence: '意图：沉默',
+        buff: `意图：强化 +${intent.v}`,
       };
-      this.text(cx, cy + r + 62, intentMap[intent.k] || '', 19, intent.k === 'attack' ? '#ff8a80' : '#ffd54f');
-      if (intent.k === 'silence') this.text(cx, cy + r + 90, '（本回合不能出攻击牌）', 13, '#8b90a6');
+      this.text(L.enemy.x, L.enemy.y + L.enemy.r + 62, map[intent.k] || '', 19, intent.k === 'attack' ? '#ff8a80' : '#ffd54f');
 
-      const badges = [];
-      if (f.enemyVuln > 0) badges.push(['vuln', f.enemyVuln]);
-      if (f.enemyWeak > 0) badges.push(['weak', f.enemyWeak]);
-      if (f.enemyBlock > 0) badges.push(['block', f.enemyBlock]);
-      const bx0 = cx - ((badges.length - 1) * 46) / 2;
-      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 128, k, v, '敌人：'));
-    }
+      const eb = [];
+      if (b.enemyVuln > 0) eb.push(['vuln', b.enemyVuln]);
+      if (b.enemyWeak > 0) eb.push(['weak', b.enemyWeak]);
+      if (b.enemyBlock > 0) eb.push(['block', b.enemyBlock]);
+      if (b.enemyStr > 0) eb.push(['strength', b.enemyStr]);
+      const ebx = L.enemy.x - ((eb.length - 1) * 46) / 2;
+      eb.forEach(([k, v], i) => this.badge(ebx + i * 46, L.enemy.y + L.enemy.r + 128, k, v, '敌人：'));
 
-    drawPlayer(run, f) {
-      const { x: cx, y: cy, r } = L.player;
-      const g = this.add.graphics();
-      g.fillStyle(0x12302a, 0.5);
-      g.fillCircle(cx, cy, r + 4);
-      g.lineStyle(2, 0x3fbf7f, 0.3);
-      g.strokeCircle(cx, cy, r + 4);
-      this.add.image(cx, cy, 'hero').setDisplaySize(r * 2.2, r * 2.2);
+      // 玩家
+      const p = L.player;
+      const pg = this.add.graphics();
+      pg.fillStyle(0x12302a, 0.5);
+      pg.fillCircle(p.x, p.y, p.r + 4);
+      pg.lineStyle(2, 0x3fbf7f, 0.3);
+      pg.strokeCircle(p.x, p.y, p.r + 4);
+      this.add.image(p.x, p.y, 'hero').setDisplaySize(p.r * 2.2, p.r * 2.2);
 
-      this.text(cx, cy - r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 19, COL.text);
-      this.bar(cx - 110, cy + r + 20, 220, 16, run.hp / run.maxHp, COL.green);
-      this.text(cx - 70, cy + r + 52, `能量 ${f.energy}/${CONFIG.ENERGY}`, 17, COL.gold);
-      if (f.block > 0) this.text(cx + 70, cy + r + 52, `格挡 ${f.block}`, 17, '#8ab4f8');
+      this.text(p.x, p.y - p.r - 40, `你 · HP ${run.hp}/${run.maxHp}`, 19, COL.text);
+      this.bar(p.x - 110, p.y + p.r + 20, 220, 16, run.hp / run.maxHp, COL.green);
+      this.text(p.x - 70, p.y + p.r + 52, `能量 ${b.energy}/${CONFIG.ENERGY}`, 17, COL.gold);
+      if (b.block > 0) this.text(p.x + 70, p.y + p.r + 52, `格挡 ${b.block}`, 17, '#8ab4f8');
 
-      const badges = [];
-      if (f.playerWeak > 0) badges.push(['weak', f.playerWeak]);
-      if (f.playerSilence > 0) badges.push(['silence', f.playerSilence]);
-      if (run.strength > 0) badges.push(['strength', run.strength]);
-      if (f.block > 0) badges.push(['block', f.block]);
-      const bx0 = cx - ((badges.length - 1) * 46) / 2;
-      badges.forEach(([k, v], i) => this.badge(bx0 + i * 46, cy + r + 100, k, v, '你：'));
-    }
+      const pb = [];
+      if (b.playerWeak > 0) pb.push(['weak', b.playerWeak]);
+      if (b.playerSilence > 0) pb.push(['silence', b.playerSilence]);
+      if (run.strength > 0) pb.push(['strength', run.strength]);
+      if (b.block > 0) pb.push(['block', b.block]);
+      const pbx = p.x - ((pb.length - 1) * 46) / 2;
+      pb.forEach(([k, v], i) => this.badge(pbx + i * 46, p.y + p.r + 100, k, v, '你：'));
 
-    render() {
-      this.tweens.killAll();
-      this.hideTip();
-      this.children.removeAll(true);
-      this.cardViews = new Map();
-      this.enemyImg = null;
-
-      const run = this.run;
-      const f = run.fight;
-
-      this.drawBackground();
-
-      this.text(W / 2, 42, `第 ${run.wins + 1} 场 / 共 ${CONFIG.TOTAL_WINS} 场`, 22, COL.text);
-      this.text(20, 84, `回合 ${f.turn}`, 15, COL.dim).setOrigin(0, 0.5);
-      this.text(W - 20, 84, `种子 ${run.seed}`, 13, COL.dim).setOrigin(1, 0.5);
-      this.button(76, 84, 104, 36, '? 词条', () => this.toggleGlossary(), 0x2a3550);
-
-      this.drawEnemy(f);
-      this.drawPlayer(run, f);
-
-      const hand = f.hand;
+      // 手牌
+      const hand = b.hand;
       const { cw, gap, y: cardY } = L.hand;
       const totalW = hand.length * (cw + gap) - gap;
       const startX = W / 2 - totalW / 2 + cw / 2;
+      const turnKey = `${b.turn}`;
+      const fresh = turnKey !== this.lastTurnKey;
+      this.lastTurnKey = turnKey;
       hand.forEach((c, i) => {
         const x = startX + i * (cw + gap);
         const check = canPlay(run, c);
-        const view = this.cardView(c, x, cardY, {
+        const view = this.cardView(c, x, cardY + (fresh ? 60 : 0), {
           disabled: !check.ok,
           onClick: () => this.tryPlay(c.uid),
         });
+        if (fresh) this.tweens.add({ targets: view, y: cardY, alpha: 1, duration: 220 + i * 40, ease: 'Cubic.easeOut' });
         this.cardViews.set(c.uid, view);
       });
 
-      if (!f.over) this.button(L.endBtn.x, L.endBtn.y, L.endBtn.w, L.endBtn.h, '结束回合', () => this.doEndTurn());
+      if (!b.over) this.button(L.endBtn.x, L.endBtn.y, L.endBtn.w, L.endBtn.h, '结束回合', () => this.doEndTurn());
 
-      if (f.playerSilence > 0) {
-        this.text(W / 2, L.log.y, '你被沉默：本回合只能出技能/能力牌', 15, '#ff8a80');
-      } else if (run.log) {
-        this.text(W / 2, L.log.y, run.log, 15, COL.gold);
-      }
+      if (b.playerSilence > 0) this.text(W / 2, 620, '你被沉默：本回合只能出技能/能力牌', 15, '#ff8a80');
+      else if (run.log) this.text(W / 2, 620, run.log, 15, COL.gold);
 
-      this.text(20, L.deckInfo.y, `抽牌堆 ${f.draw.length}`, 14, COL.dim).setOrigin(0, 0.5);
-      this.text(140, L.deckInfo.y, `弃牌堆 ${f.discard.length}`, 14, COL.dim).setOrigin(0, 0.5);
-      this.text(W - 20, L.deckInfo.y, `出牌 ${run.stats.cardsPlayed} · 伤害 ${run.stats.dmgDealt} · 承伤 ${run.stats.dmgTaken}`, 11, '#5b6075').setOrigin(1, 0.5);
+      this.text(20, 1250, `抽牌堆 ${b.draw.length}`, 14, COL.dim).setOrigin(0, 0.5);
+      this.text(140, 1250, `弃牌堆 ${b.discard.length}`, 14, COL.dim).setOrigin(0, 0.5);
 
-      if (this.showGlossary) this.drawGlossary();
-      if (f.over) this.drawOverlay(f);
-      this.renderFloats();
+      if (b.over) this.drawBattleOver(b);
     }
 
-    drawGlossary() {
-      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.82).setInteractive();
-      this.text(W / 2, 250, '词条说明', 28, COL.gold);
-      this.text(W / 2, 292, '点卡牌、状态徽章也能看到解释', 14, COL.dim);
-      const keys = Object.keys(KEYWORDS);
-      const rowH = 66;
-      const top = 360;
-      keys.forEach((key, i) => {
-        const k = KEYWORDS[key];
-        const y = top + i * rowH;
-        const g = this.add.graphics();
-        g.fillStyle(0x1a1d2b, 1);
-        g.fillRoundedRect(W / 2 - 320, y - 26, 640, 54, 10);
-        g.lineStyle(1, 0x2c3147, 1);
-        g.strokeRoundedRect(W / 2 - 320, y - 26, 640, 54, 10);
-        g.lineStyle(2, Phaser.Display.Color.HexStringToColor(k.color).color, 1);
-        g.strokeCircle(W / 2 - 284, y + 1, 17);
-        this.text(W / 2 - 284, y + 1, k.short, 16, k.color);
-        this.text(W / 2 - 250, y, k.name, 17, k.color).setOrigin(0, 0.5);
-        this.text(W / 2 - 188, y, k.desc, 15, '#c9cde0').setOrigin(0, 0.5);
-      });
-      this.button(W / 2, top + keys.length * rowH + 26, 180, 50, '关闭', () => this.toggleGlossary(), 0x2a3550);
+    drawBattleOver(b) {
+      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.72);
+      this.input.once('pointerdown', () => { finishBattle(this.run); this.scheduleRender(); });
+      if (b.result === 'lose') {
+        this.sfx('lose');
+        this.text(W / 2, H / 2 - 60, '你倒下了', 40, '#ff6b6b');
+        this.text(W / 2, H / 2 + 10, '点击继续', 16, COL.dim);
+      } else {
+        this.sfx('win');
+        this.text(W / 2, H / 2 - 60, '胜利', 40, COL.gold);
+        this.text(W / 2, H / 2 + 10, '点击继续', 16, COL.dim);
+      }
     }
 
-    toggleGlossary() {
-      this.showGlossary = !this.showGlossary;
-      this.scheduleRender();
-    }
-
-    drawOverlay(f) {
-      if (!this.overSound) { this.overSound = true; this.sfx(f.result === 'lose' ? 'lose' : 'win'); }
-      this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.72).setInteractive();
-      const run = this.run;
-
-      if (f.result === 'lose') {
-        this.text(W / 2, H / 2 - 110, '你倒下了', 38, '#ff6b6b');
-        this.text(W / 2, H / 2 - 50, `第 ${run.wins + 1} 场失败 · 出牌 ${run.stats.cardsPlayed} 次`, 17, COL.dim);
-        this.button(W / 2, H / 2 + 50, 200, 56, '再来一局', () => this.restart(), 0x8a2b2b);
-        return;
-      }
-
-      if (run.wins >= CONFIG.TOTAL_WINS - 1) {
-        this.text(W / 2, H / 2 - 120, '通关！', 42, COL.gold);
-        this.text(W / 2, H / 2 - 56, `连赢 ${CONFIG.TOTAL_WINS} 场，牌组 ${run.deck.length} 张`, 18, COL.dim);
-        this.button(W / 2, H / 2 + 36, 200, 56, '再来一局', () => this.restart(), 0x2f7a4a);
-        return;
-      }
-
-      this.text(W / 2, 240, '战斗胜利', 30, COL.gold);
-      this.text(W / 2, 286, '选一张牌加入牌组', 17, COL.dim);
-      const rewards = offerRewards(run);
+    // ── 奖励 ────────────────────────────────────────────────
+    renderReward(run) {
+      const r = run.reward;
+      this.text(W / 2, 200, '战斗胜利', 32, COL.gold);
+      this.text(W / 2, 250, `获得 ${r.gold} 金币`, 18, COL.dim);
+      this.text(W / 2, 320, '选一张牌加入牌组', 18, COL.dim);
       const cw = 150, gap = 16;
-      const totalW = rewards.length * (cw + gap) - gap;
+      const totalW = r.cards.length * (cw + gap) - gap;
       const startX = W / 2 - totalW / 2 + cw / 2;
-      rewards.forEach((type, i) => {
-        const def = CARD_DEFS[type];
-        const card = { uid: -1 - i, type, name: def.name, cost: def.cost, type2: def.type, text: def.text, ops: def.ops, kw: def.kw };
-        this.cardView(card, startX + i * (cw + gap), 500, {
+      r.cards.forEach((type, i) => {
+        const d = CARD_DEFS[type];
+        const card = { uid: -1 - i, type, name: d.name, cost: d.cost, type2: d.type, text: d.text, ops: d.ops, kw: d.kw };
+        this.cardView(card, startX + i * (cw + gap), 520, {
           w: 150, h: 200, big: true,
-          onClick: () => this.chooseReward(type),
+          onClick: () => { pickReward(run, type); this.scheduleRender(); },
         });
       });
-      this.button(W / 2, 700, 200, 50, '跳过（不推荐）', () => this.chooseReward(null), 0x2a3550);
+      this.button(W / 2, 720, 200, 50, '跳过', () => { pickReward(run, null); this.scheduleRender(); }, 0x2a3550);
     }
 
-    burst(x, y, color, count = 12) {
-      for (let i = 0; i < count; i++) {
-        const p = this.add.rectangle(x, y, 5, 5, color);
-        const a = Math.random() * Math.PI * 2;
-        const d = 36 + Math.random() * 70;
-        this.tweens.add({
-          targets: p,
-          x: x + Math.cos(a) * d,
-          y: y + Math.sin(a) * d,
-          alpha: 0,
-          scale: 0.2,
-          duration: 320 + Math.random() * 180,
-          ease: 'Quad.easeOut',
-          onComplete: () => p.destroy(),
+    // ── 奇遇 ────────────────────────────────────────────────
+    renderEvent(run) {
+      const ev = run.event;
+      this.text(W / 2, 150, ev.def.title, 30, COL.gold);
+      this.add.rectangle(W / 2, 300, W - 100, 180, 0x0a0c12, 0.9).setStrokeStyle(1, 0x2a3147);
+      this.add.text(80, 240, ev.def.desc, {
+        fontFamily: FONT, fontSize: '18px', color: '#c9cde0',
+        wordWrap: { width: W - 160 }, lineSpacing: 8,
+      });
+
+      if (!ev.resolved) {
+        ev.def.choices.forEach((ch, i) => {
+          const y = 520 + i * 96;
+          const lack = (ch.cost && ch.cost.hp && run.hp <= ch.cost.hp) || (ch.cost && ch.cost.gold && run.gold < ch.cost.gold);
+          this.button(W / 2, y, W - 140, 64, ch.text, () => {
+            this.sfx('tap');
+            applyEventChoice(run, i);
+            this.render();
+          }, 0x35406b, !!lack);
         });
+      } else {
+        this.add.text(80, 460, ev.resultText, {
+          fontFamily: FONT, fontSize: '19px', color: '#e8eaf2',
+          wordWrap: { width: W - 160 }, lineSpacing: 8,
+        });
+        this.button(W / 2, 640, 220, 54, '继续', () => { this.sfx('tap'); leaveEvent(run); this.scheduleRender(); }, 0x3b5bdb);
       }
+
+      this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
+      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
     }
 
+    // ── 商店 ────────────────────────────────────────────────
+    renderShop(run) {
+      const shop = run.shop;
+      this.text(W / 2, 130, '漂泊商人', 30, COL.gold);
+      this.text(W / 2, 172, '「只收金币，不讲价。」', 15, COL.dim);
+
+      shop.cards.forEach((item, i) => {
+        const d = CARD_DEFS[item.type];
+        const card = { uid: -100 - i, type: item.type, name: d.name, cost: d.cost, type2: d.type, text: d.text, ops: d.ops, kw: d.kw };
+        const y = 380 + i * 0;
+        const x = 200 + i * 160;
+        this.cardView(card, x, 400, {
+          w: 140, h: 190,
+          onClick: () => {
+            if (item.bought) return;
+            if (run.gold < item.price) { this.sfx('deny'); return; }
+            buyCard(run, i);
+            this.sfx('coin');
+            this.scheduleRender();
+          },
+        });
+        this.text(x, 530, item.bought ? '已售出' : `${item.price} 金`, 16, item.bought ? '#4a5066' : COL.gold);
+      });
+
+      this.button(W / 2, 700, W - 160, 58, shop.healBought ? '热汤（已喝过）' : '热汤 · 25 生命 / 30 金', () => {
+        if (shop.healBought || run.gold < 30) { this.sfx('deny'); return; }
+        buyHeal(run);
+        this.sfx('coin');
+        this.scheduleRender();
+      }, 0x2f6a4a, shop.healBought || run.gold < 30);
+
+      this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
+      this.text(W - 30, 60, `金币 ${run.gold}`, 16, COL.gold).setOrigin(1, 0.5);
+      if (run.log) this.text(W / 2, 800, run.log, 15, COL.gold);
+      this.button(W / 2, 880, 220, 54, '离开', () => { this.sfx('tap'); leaveShop(run); this.scheduleRender(); }, 0x2a3550);
+    }
+
+    // ── 篝火 ────────────────────────────────────────────────
+    renderRest(run) {
+      this.text(W / 2, 260, '篝火', 32, COL.gold);
+      this.text(W / 2, 320, '火光照着你，影子终于不抖了。', 17, COL.dim);
+      this.button(W / 2, 480, W - 140, 70, '休整 · 回复 30% 生命', () => {
+        this.sfx('heal');
+        restHeal(run);
+        this.scheduleRender();
+      }, 0x2f6a4a);
+      this.button(W / 2, 590, W - 140, 70, '磨砺 · 移除一张「打击」', () => {
+        this.sfx('tap');
+        restRemove(run);
+        this.scheduleRender();
+      }, 0x35406b);
+      this.text(30, 60, `生命 ${run.hp}/${run.maxHp}`, 16, '#ff8a80').setOrigin(0, 0.5);
+    }
+
+    // ── 结局 ────────────────────────────────────────────────
+    renderEnding(run) {
+      const win = run.resultText === 'win';
+      this.text(W / 2, 200, win ? '钟声' : '长夜', 40, win ? COL.gold : '#ff6b6b');
+      const lines = win ? ENDING_WIN : ENDING_LOSE;
+      let y = 320;
+      lines.forEach((ln) => {
+        const t = this.add.text(80, y, ln, {
+          fontFamily: FONT, fontSize: '20px', color: win ? '#e8eaf2' : '#c9cde0',
+          wordWrap: { width: W - 160 }, lineSpacing: 8,
+        });
+        y += Math.ceil(t.height) + 28;
+      });
+      this.text(W / 2, 1000, `出牌 ${run.stats.cardsPlayed} 次 · 战斗 ${run.stats.battles} 场 · 牌组 ${run.deck.length} 张`, 15, COL.dim);
+      this.button(W / 2, 1100, 240, 62, '再守一夜', () => {
+        this.run = newRun(Date.now() & 0xffff);
+        this.scheduleRender();
+      }, win ? 0x2f7a4a : 0x8a2b2b);
+    }
+
+    // ── 战斗操作 ────────────────────────────────────────────
     scheduleRender() {
       if (this.renderPending) return;
       this.renderPending = true;
@@ -705,37 +1088,30 @@
     tryPlay(uid) {
       if (this.acting) return;
       this.hideTip();
-      const f = this.run.fight;
-      const card = f.hand.find((c) => c.uid === uid);
+      const run = this.run;
+      const b = run.battle;
+      const card = b.hand.find((c) => c.uid === uid);
       if (!card) return;
-      const hpBefore = f.enemyHp;
-      const blockBefore = f.block;
-      const res = playCard(this.run, uid);
+      const hpBefore = b.enemyHp;
+      const blockBefore = b.block;
+      const res = playCard(run, uid);
       if (!res.ok) {
-        if (res.why === 'energy') this.run.log = '能量不足';
-        else if (res.why === 'silence') this.run.log = '被沉默：本回合不能出攻击牌';
-        else if (res.why === 'over') this.run.log = '战斗已结束';
+        if (res.why === 'energy') run.log = '能量不足';
+        else if (res.why === 'silence') run.log = '被沉默：本回合不能出攻击牌';
         this.cameras.main.shake(90, 0.004);
         this.sfx('deny');
         this.scheduleRender();
         return;
       }
-
       this.acting = true;
       const isAttack = card.type2 === 'attack';
       const view = this.cardViews.get(uid);
       const tx = isAttack ? L.enemy.x : L.player.x;
       const ty = isAttack ? L.enemy.y : L.player.y;
-      if (view) {
-        this.tweens.add({
-          targets: view, x: tx, y: ty, scale: 0.25, alpha: 0.2,
-          duration: 240, ease: 'Cubic.easeIn',
-          onComplete: () => { if (view.active) view.destroy(); },
-        });
-      }
+      if (view) this.tweens.add({ targets: view, x: tx, y: ty, scale: 0.25, alpha: 0.2, duration: 240, ease: 'Cubic.easeIn', onComplete: () => { if (view.active) view.destroy(); } });
 
-      if (f.enemyHp < hpBefore) {
-        this.addFloat(L.enemy.x + 96, L.enemy.y - 150, `-${hpBefore - f.enemyHp}`, '#ff6b6b');
+      if (b.enemyHp < hpBefore) {
+        this.addFloat(L.enemy.x + 96, L.enemy.y - 150, `-${hpBefore - b.enemyHp}`, '#ff6b6b');
         this.burst(L.enemy.x, L.enemy.y, 0xffd54f, 14);
         this.sfx('hit');
         this.cameras.main.shake(120, 0.008);
@@ -744,29 +1120,26 @@
       } else {
         this.sfx('block');
       }
-      if (f.block > blockBefore) {
-        this.addFloat(L.player.x - 90, L.player.y + 110, `+${f.block - blockBefore} 格挡`, '#8ab4f8');
+      if (b.block > blockBefore) {
+        this.addFloat(L.player.x - 90, L.player.y + 110, `+${b.block - blockBefore} 格挡`, '#8ab4f8');
         this.burst(L.player.x, L.player.y, 0x8ab4f8, 10);
       }
       if (card.ops.some((o) => o.k === 'vuln')) this.addFloat(L.enemy.x + 96, L.enemy.y - 100, '易伤 +2', '#ffb74d');
       if (card.ops.some((o) => o.k === 'weak')) this.addFloat(L.enemy.x + 96, L.enemy.y - 100, '虚弱 +2', '#b39ddb');
-      if (card.ops.some((o) => o.k === 'str')) {
-        this.addFloat(L.player.x, L.player.y + 110, '力量 +2', '#ffd54f');
-        this.burst(L.player.x, L.player.y, 0xffd54f, 12);
-      }
+      if (card.ops.some((o) => o.k === 'str')) { this.addFloat(L.player.x, L.player.y + 110, '力量 +2', '#ffd54f'); this.burst(L.player.x, L.player.y, 0xffd54f, 12); }
+      if (card.ops.some((o) => o.k === 'heal')) this.addFloat(L.player.x, L.player.y - 100, '+4', '#7ee787');
 
-      this.time.delayedCall(270, () => {
-        this.acting = false;
-        this.scheduleRender();
-      });
+      this.time.delayedCall(270, () => { this.acting = false; this.scheduleRender(); });
     }
 
     doEndTurn() {
       if (this.acting) return;
-      const hpBefore = this.run.hp;
-      endTurn(this.run);
-      if (this.run.hp < hpBefore) {
-        this.addFloat(L.player.x, L.player.y + 110, `-${hpBefore - this.run.hp}`, '#ff6b6b');
+      const run = this.run;
+      const b = run.battle;
+      const hpBefore = run.hp;
+      endTurn(run);
+      if (run.hp < hpBefore) {
+        this.addFloat(L.player.x, L.player.y + 110, `-${hpBefore - run.hp}`, '#ff6b6b');
         this.burst(L.player.x, L.player.y, 0xff6b6b, 12);
         this.sfx('hurt');
         this.cameras.main.shake(140, 0.009);
@@ -775,51 +1148,95 @@
         this.sfx('block');
       }
       this.acting = true;
-      this.time.delayedCall(180, () => {
-        this.acting = false;
-        this.scheduleRender();
-      });
+      this.time.delayedCall(180, () => { this.acting = false; this.scheduleRender(); });
+    }
+
+    burst(x, y, color, count = 12) {
+      for (let i = 0; i < count; i++) {
+        const p = this.add.rectangle(x, y, 5, 5, color);
+        const a = Math.random() * Math.PI * 2;
+        const d = 36 + Math.random() * 70;
+        this.tweens.add({
+          targets: p, x: x + Math.cos(a) * d, y: y + Math.sin(a) * d,
+          alpha: 0, scale: 0.2, duration: 320 + Math.random() * 180, ease: 'Quad.easeOut',
+          onComplete: () => p.destroy(),
+        });
+      }
+    }
+
+    // ── 音频 ────────────────────────────────────────────────
+    ensureAudio() {
+      if (!this.ac) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        this.ac = new AC();
+        this.master = this.ac.createGain();
+        this.master.gain.value = this.muted ? 0 : 1;
+        this.master.connect(this.ac.destination);
+      }
+      if (this.ac.state === 'suspended') this.ac.resume();
+      return this.ac;
+    }
+
+    startBgm() {
+      const ctx = this.ensureAudio();
+      if (!ctx || this.bgmTimer) return;
+      const chords = [
+        [220.0, 261.6, 329.6],
+        [174.6, 220.0, 261.6],
+        [261.6, 329.6, 392.0],
+        [196.0, 246.9, 293.7],
+      ];
+      let i = 0;
+      const playChord = () => {
+        const c = chords[i % chords.length];
+        const t = ctx.currentTime;
+        c.forEach((f, j) => {
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = j === 0 ? 'sine' : 'triangle';
+          o.frequency.value = f;
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.linearRampToValueAtTime(j === 0 ? 0.05 : 0.03, t + 1.2);
+          g.gain.linearRampToValueAtTime(0.0001, t + 5.4);
+          o.connect(g);
+          g.connect(this.master);
+          o.start(t);
+          o.stop(t + 5.6);
+        });
+        i++;
+      };
+      playChord();
+      this.bgmTimer = setInterval(playChord, 5400);
     }
 
     sfx(kind) {
-      try {
-        if (!this.ac) this.ac = new (window.AudioContext || window.webkitAudioContext)();
-        if (this.ac.state === 'suspended') this.ac.resume();
-        const ctx = this.ac;
-        const play = (freq, dur, type, vol, when = 0, slideTo = null) => {
-          const t0 = ctx.currentTime + when;
-          const o = ctx.createOscillator();
-          const g = ctx.createGain();
-          o.type = type;
-          o.frequency.setValueAtTime(freq, t0);
-          if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
-          g.gain.setValueAtTime(0.0001, t0);
-          g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
-          g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-          o.connect(g);
-          g.connect(ctx.destination);
-          o.start(t0);
-          o.stop(t0 + dur + 0.03);
-        };
-        if (kind === 'hit') {
-          play(180, 0.16, 'sawtooth', 0.07, 0, 60);
-          play(90, 0.2, 'square', 0.04, 0.01);
-        } else if (kind === 'hurt') {
-          play(120, 0.22, 'sawtooth', 0.08, 0, 50);
-        } else if (kind === 'block') {
-          play(520, 0.1, 'triangle', 0.05);
-          play(780, 0.08, 'sine', 0.03, 0.02);
-        } else if (kind === 'deny') {
-          play(190, 0.09, 'square', 0.035);
-        } else if (kind === 'turn') {
-          play(320, 0.12, 'sine', 0.04);
-          play(480, 0.14, 'sine', 0.03, 0.05);
-        } else if (kind === 'win') {
-          [523, 659, 784, 1046].forEach((f, i) => play(f, 0.18, 'triangle', 0.06, i * 0.12));
-        } else if (kind === 'lose') {
-          [330, 262, 196, 147].forEach((f, i) => play(f, 0.24, 'sawtooth', 0.05, i * 0.14));
-        }
-      } catch (e) { /* 音频不可用时静默 */ }
+      const ctx = this.ensureAudio();
+      if (!ctx) return;
+      const play = (freq, dur, type, vol, when = 0, slideTo = null) => {
+        const t0 = ctx.currentTime + when;
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = type;
+        o.frequency.setValueAtTime(freq, t0);
+        if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        o.connect(g);
+        g.connect(this.master);
+        o.start(t0);
+        o.stop(t0 + dur + 0.03);
+      };
+      if (kind === 'hit') { play(180, 0.16, 'sawtooth', 0.07, 0, 60); play(90, 0.2, 'square', 0.04, 0.01); }
+      else if (kind === 'hurt') play(120, 0.22, 'sawtooth', 0.08, 0, 50);
+      else if (kind === 'block') { play(520, 0.1, 'triangle', 0.05); play(780, 0.08, 'sine', 0.03, 0.02); }
+      else if (kind === 'deny') play(190, 0.09, 'square', 0.035);
+      else if (kind === 'tap') play(600, 0.05, 'sine', 0.03);
+      else if (kind === 'coin') { play(880, 0.08, 'triangle', 0.05); play(1180, 0.1, 'sine', 0.04, 0.06); }
+      else if (kind === 'heal') { [523, 659].forEach((f, i) => play(f, 0.2, 'sine', 0.05, i * 0.1)); }
+      else if (kind === 'win') [523, 659, 784, 1046].forEach((f, i) => play(f, 0.18, 'triangle', 0.06, i * 0.12));
+      else if (kind === 'lose') [330, 262, 196, 147].forEach((f, i) => play(f, 0.24, 'sawtooth', 0.05, i * 0.14));
     }
 
     addFloat(x, y, text, color) {
@@ -838,29 +1255,6 @@
         this.tweens.add({ targets: t, alpha: 0, duration: Math.max(140, 900 - age), ease: 'Quad.easeIn' });
       });
     }
-
-    chooseReward(type) {
-      if (this.rewardLocked) return;
-      this.rewardLocked = true;
-      if (type) pickReward(this.run, type);
-      else this.run.wins++;
-      if (this.run.wins >= CONFIG.TOTAL_WINS) { this.rewardLocked = false; this.scheduleRender(); return; }
-      startFight(this.run, this.run.wins);
-      this.rewardLocked = false;
-      this.overSound = false;
-      this.floats = [];
-      this.sfx('turn');
-      this.scheduleRender();
-    }
-
-    restart() {
-      this.run = newRun(Date.now() & 0xffff);
-      startFight(this.run, 0);
-      this.overSound = false;
-      this.floats = [];
-      this.acting = false;
-      this.scheduleRender();
-    }
   }
 
   const game = new Phaser.Game({
@@ -868,10 +1262,10 @@
     parent: 'game',
     width: W,
     height: H,
-    backgroundColor: '#0d0f16',
+    backgroundColor: '#0b0d13',
     pixelArt: true,
     scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-    scene: [BattleScene],
+    scene: [GameScene],
   });
   Object.assign(window, { game });
 })();
